@@ -1,0 +1,35 @@
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Android/Gradle local files
+android/.gradle/
+android/.kotlin/
+android/local.properties
+
+# iOS generated local files
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Flutter/ephemeral/
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# Node dependencies and local secrets
+node_modules/
+**/node_modules/
+.env
+*.env
+
+# Local/editor/generated artifacts
+.idea/
+*.iml
+*.log
+*.apk
+*.ipa
+*.xcarchive

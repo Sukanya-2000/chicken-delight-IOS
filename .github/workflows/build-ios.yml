@@ -1,0 +1,42 @@
+name: Build iOS User App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign -t lib/main.dart
+
+      - name: Package unsigned app
+        run: |
+          mkdir -p build/ios/unsigned
+          cd build/ios/iphoneos
+          zip -r ../unsigned/ChickenDelight-iOS-unsigned.zip Runner.app
+
+      - name: Upload unsigned iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChickenDelight-iOS-unsigned
+          path: build/ios/unsigned/ChickenDelight-iOS-unsigned.zip
