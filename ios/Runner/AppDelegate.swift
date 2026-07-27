@@ -80,7 +80,7 @@ import UIKit
     address: String?,
     latitude: Double?,
     longitude: Double?,
-    result: FlutterResult
+    result: @escaping FlutterResult
   ) {
     let destination = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     let hasCoordinates = latitude != nil && longitude != nil
