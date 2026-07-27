@@ -106,32 +106,14 @@ import UIKit
     let app = UIApplication.shared
     if let googleMapsUrl = URL(string: "comgooglemaps://?daddr=\(encodedQuery)&directionsmode=driving"),
        app.canOpenURL(googleMapsUrl) {
-      app.open(googleMapsUrl) { success in
-        if success {
-          result(nil)
-        } else {
-          result(FlutterError(
-            code: "no_map_app",
-            message: "No map app is available on this device.",
-            details: nil
-          ))
-        }
-      }
+      result(nil)
+      app.open(googleMapsUrl)
       return
     }
 
     if let appleMapsUrl = URL(string: "http://maps.apple.com/?daddr=\(encodedQuery)&dirflg=d") {
-      app.open(appleMapsUrl) { success in
-        if success {
-          result(nil)
-        } else {
-          result(FlutterError(
-            code: "no_map_app",
-            message: "No map app is available on this device.",
-            details: nil
-          ))
-        }
-      }
+      result(nil)
+      app.open(appleMapsUrl)
       return
     }
 
