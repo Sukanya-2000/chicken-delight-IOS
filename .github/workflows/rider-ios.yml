@@ -1,0 +1,54 @@
+name: Build iOS Rider App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rider-ios.yml"
+      - "ios/**"
+      - "lib/**"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+
+jobs:
+  build-rider-ios:
+    name: Build unsigned rider iOS app
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build unsigned rider iOS app
+        run: |
+          flutter build ios --release --no-codesign \
+            -t lib/rider_main.dart \
+            --dart-define RMS_API_BASE_URL=https://rms-backend-v1.vercel.app
+
+      - name: Package unsigned rider app
+        run: |
+          mkdir -p build/ios/unsigned-rider/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/unsigned-rider/Payload/ChickenDelightRider.app
+          cd build/ios/unsigned-rider
+          zip -qry ChickenDelight-Rider-iOS-unsigned.ipa Payload
+
+      - name: Upload unsigned rider iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChickenDelight-Rider-iOS-unsigned
+          path: build/ios/unsigned-rider/ChickenDelight-Rider-iOS-unsigned.ipa
+          if-no-files-found: error

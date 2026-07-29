@@ -5,6 +5,8 @@ import UIKit
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, CLLocationManagerDelegate {
   private let locationChannelName = "com.example.chicken_delight/location"
+  private let riderStorageChannelName = "com.example.chicken_delight/rider_storage"
+  private let riderDefaultsSuiteName = "chicken_delight_rider"
   private let locationManager = CLLocationManager()
   private var pendingLocationResult: FlutterResult?
 
@@ -38,6 +40,36 @@ import UIKit
           longitude: self.doubleArgument(arguments?["longitude"]),
           result: result
         )
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    let storageChannel = FlutterMethodChannel(
+      name: riderStorageChannelName,
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    storageChannel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else { return }
+      let defaults = UserDefaults(suiteName: self.riderDefaultsSuiteName) ?? .standard
+      let arguments = call.arguments as? [String: Any]
+      let key = arguments?["key"] as? String
+
+      switch call.method {
+      case "getStringList":
+        guard let key = key else {
+          result(FlutterError(code: "missing_key", message: "Storage key is missing.", details: nil))
+          return
+        }
+        result(defaults.stringArray(forKey: key) ?? [])
+      case "setStringList":
+        guard let key = key else {
+          result(FlutterError(code: "missing_key", message: "Storage key is missing.", details: nil))
+          return
+        }
+        let values = arguments?["values"] as? [String] ?? []
+        defaults.set(values, forKey: key)
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
