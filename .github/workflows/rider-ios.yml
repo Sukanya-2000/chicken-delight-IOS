@@ -14,8 +14,11 @@ on:
 
 jobs:
   build-rider-ios:
-    name: Build unsigned rider iOS app
+    name: Build signed rider iOS app
     runs-on: macos-15
+    env:
+      APP_BUNDLE_ID: com.chickendelight.rider
+      APP_STORE_PROFILE_NAME: Chicken Delight Rider App Store
 
     steps:
       - name: Checkout code
@@ -33,22 +36,86 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build unsigned rider iOS app
+      - name: Install Apple signing assets
+        env:
+          IOS_DISTRIBUTION_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          flutter build ios --release --no-codesign \
+          set -euo pipefail
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/ios_distribution.p12"
+          PROVISION_PATH="$RUNNER_TEMP/rider.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          EXPORT_OPTIONS_PATH="$RUNNER_TEMP/ExportOptions.plist"
+
+          echo "$IOS_DISTRIBUTION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROVISION_PATH"
+
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$IOS_DISTRIBUTION_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          security cms -D -i "$PROVISION_PATH" -o "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/profile.plist")
+          cp "$PROVISION_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          cat > "$EXPORT_OPTIONS_PATH" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$APP_BUNDLE_ID</key>
+              <string>$PROFILE_NAME</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+          echo "EXPORT_OPTIONS_PATH=$EXPORT_OPTIONS_PATH" >> "$GITHUB_ENV"
+
+      - name: Build signed rider iOS app
+        run: |
+          flutter build ipa --release \
             -t lib/rider_main.dart \
-            --dart-define RMS_API_BASE_URL=https://rms-backend-v1.vercel.app
+            --dart-define RMS_API_BASE_URL=https://rms-backend-v1.vercel.app \
+            --export-options-plist "$EXPORT_OPTIONS_PATH"
 
-      - name: Package unsigned rider app
-        run: |
-          mkdir -p build/ios/unsigned-rider/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ios/unsigned-rider/Payload/ChickenDelightRider.app
-          cd build/ios/unsigned-rider
-          zip -qry ChickenDelight-Rider-iOS-unsigned.ipa Payload
-
-      - name: Upload unsigned rider iOS artifact
+      - name: Upload signed rider IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ChickenDelight-Rider-iOS-unsigned
-          path: build/ios/unsigned-rider/ChickenDelight-Rider-iOS-unsigned.ipa
+          name: ChickenDelight-Rider-iOS-signed
+          path: build/ios/ipa/*.ipa
           if-no-files-found: error
+
+      - name: Upload rider build to TestFlight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/private_keys"
+          printf "%s" "$APP_STORE_CONNECT_PRIVATE_KEY" > "$HOME/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+
+          IPA_PATH=$(find build/ios/ipa -name "*.ipa" -print -quit)
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
