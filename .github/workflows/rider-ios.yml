@@ -15,7 +15,7 @@ on:
 jobs:
   build-rider-ios:
     name: Build signed rider iOS app
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       APP_BUNDLE_ID: com.chickendelight.rider
       APP_STORE_PROFILE_NAME: Chicken Delight Rider App Store
@@ -32,6 +32,11 @@ jobs:
 
       - name: Show Flutter version
         run: flutter --version
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
       - name: Install dependencies
         run: flutter pub get
