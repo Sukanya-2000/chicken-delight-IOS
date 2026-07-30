@@ -97,6 +97,8 @@ jobs:
         run: |
           flutter build ipa --release \
             -t lib/rider_main.dart \
+            --build-name 1.0.0 \
+            --build-number "$GITHUB_RUN_NUMBER" \
             --dart-define RMS_API_BASE_URL=https://rms-backend-v1.vercel.app \
             --export-options-plist "$EXPORT_OPTIONS_PATH"
 
