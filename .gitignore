@@ -33,3 +33,12 @@ node_modules/
 *.apk
 *.ipa
 *.xcarchive
+
+# Local visual QA captures
+*.png
+window*.xml
+
+# App assets that must stay versioned
+!ios/Runner/Assets.xcassets/**/*.png
+!web/icons/*.png
+!web/favicon.png
