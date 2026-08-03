@@ -54,8 +54,11 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           EXPORT_OPTIONS_PATH="$RUNNER_TEMP/ExportOptions.plist"
 
-          echo "$IOS_DISTRIBUTION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-          echo "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROVISION_PATH"
+          printf "%s" "$IOS_DISTRIBUTION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          printf "%s" "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROVISION_PATH"
+
+          test -s "$CERTIFICATE_PATH"
+          test -s "$PROVISION_PATH"
 
           security create-keychain -p "" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
