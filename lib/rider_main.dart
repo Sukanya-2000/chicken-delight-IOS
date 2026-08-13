@@ -626,7 +626,7 @@ class _RiderAuthScreenState extends State<RiderAuthScreen> {
           const Duration(seconds: 8),
         );
         await widget.apiClient.tryUpdateDriverLocation(
-          driver.id,
+          driver,
           latitude: location.latitude,
           longitude: location.longitude,
         );
@@ -728,9 +728,9 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
 
     try {
       final orders =
-          await widget.apiClient.fetchDriverAssignments(widget.driver.id);
+          await widget.apiClient.fetchDriverAssignments(widget.driver);
       final activity = await widget.apiClient
-          .fetchDriverActivity(widget.driver.id)
+          .fetchDriverActivity(widget.driver)
           .catchError((_) => RiderActivityReport.fromOrders(orders));
       final localStats = RiderActivityStats.fromDeliveredOrders(orders);
       if (!mounted) return;
@@ -768,7 +768,11 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   Future<void> _updateStatus(RiderOrder order, String status) async {
     setState(() => _updating = true);
     try {
-      await widget.apiClient.updateOrderStatus(order.id, status);
+      await widget.apiClient.updateOrderStatus(
+        order.id,
+        status,
+        driver: widget.driver,
+      );
       if (status == 'completed' || status == 'delivered') {
         setState(() => _rememberActivityOrder(order));
       }
@@ -859,7 +863,7 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
     setState(() => _online = value);
     try {
       final updated = await widget.apiClient.updateDriverStatus(
-        widget.driver.id,
+        widget.driver,
         value ? 'available' : 'offline',
       );
       widget.onDriverChanged(updated);
@@ -1174,6 +1178,12 @@ class RiderApiClient {
     return query == null ? uri : uri.replace(queryParameters: query);
   }
 
+  Map<String, String> _jsonHeaders([String? token]) => {
+        'Content-Type': 'application/json',
+        if (token != null && token.trim().isNotEmpty)
+          'Authorization': 'Bearer ${token.trim()}',
+      };
+
   Future<RiderDriver> loginDriver({
     required String driverId,
     required String password,
@@ -1182,7 +1192,7 @@ class RiderApiClient {
     final response = await _httpClient
         .post(
           _uri('/api/delivery/driver/login'),
-          headers: const {'Content-Type': 'application/json'},
+          headers: _jsonHeaders(),
           body: jsonEncode({
             'driverId': driverId,
             'password': password,
@@ -1220,11 +1230,14 @@ class RiderApiClient {
     return branch;
   }
 
-  Future<RiderDriver> updateDriverStatus(String id, String status) async {
+  Future<RiderDriver> updateDriverStatus(
+    RiderDriver driver,
+    String status,
+  ) async {
     final response = await _httpClient
         .patch(
-          _uri('/api/delivery/driver/$id/status'),
-          headers: const {'Content-Type': 'application/json'},
+          _uri('/api/delivery/driver/${driver.id}/status'),
+          headers: _jsonHeaders(driver.token),
           body: jsonEncode({'status': status}),
         )
         .timeout(const Duration(seconds: 15));
@@ -1233,18 +1246,18 @@ class RiderApiClient {
     if (data is! Map<String, dynamic>) {
       throw Exception('RMS did not return driver profile.');
     }
-    return RiderDriver.fromJson(data);
+    return RiderDriver.fromJson(data).withToken(driver.token);
   }
 
   Future<void> updateDriverLocation(
-    String id, {
+    RiderDriver driver, {
     required double latitude,
     required double longitude,
   }) async {
     final response = await _httpClient
         .post(
-          _uri('/api/delivery/driver/$id/location'),
-          headers: const {'Content-Type': 'application/json'},
+          _uri('/api/delivery/driver/${driver.id}/location'),
+          headers: _jsonHeaders(driver.token),
           body: jsonEncode({
             'lat': latitude,
             'lng': longitude,
@@ -1256,19 +1269,19 @@ class RiderApiClient {
   }
 
   Future<void> tryUpdateDriverLocation(
-    String id, {
+    RiderDriver driver, {
     required double latitude,
     required double longitude,
   }) async {
     try {
       await updateDriverLocation(
-        id,
+        driver,
         latitude: latitude,
         longitude: longitude,
       );
     } catch (error) {
       final message = '$error';
-      if (message.contains('/api/delivery/driver/$id/location') &&
+      if (message.contains('/api/delivery/driver/${driver.id}/location') &&
           message.contains('returned 404')) {
         return;
       }
@@ -1276,10 +1289,11 @@ class RiderApiClient {
     }
   }
 
-  Future<List<RiderOrder>> fetchDriverAssignments(String driverId) async {
+  Future<List<RiderOrder>> fetchDriverAssignments(RiderDriver driver) async {
     final response = await _httpClient
         .get(
-          _uri('/api/delivery/driver/$driverId/assignments'),
+          _uri('/api/delivery/driver/${driver.id}/assignments'),
+          headers: _jsonHeaders(driver.token),
         )
         .timeout(const Duration(seconds: 15));
     final body = _decode(response);
@@ -1293,10 +1307,11 @@ class RiderApiClient {
     return orders;
   }
 
-  Future<RiderActivityReport> fetchDriverActivity(String driverId) async {
+  Future<RiderActivityReport> fetchDriverActivity(RiderDriver driver) async {
     final response = await _httpClient
         .get(
-          _uri('/api/delivery/driver/$driverId/activity'),
+          _uri('/api/delivery/driver/${driver.id}/activity'),
+          headers: _jsonHeaders(driver.token),
         )
         .timeout(const Duration(seconds: 15));
     final body = _decode(response);
@@ -1321,7 +1336,11 @@ class RiderApiClient {
     );
   }
 
-  Future<void> updateOrderStatus(String orderId, String status) async {
+  Future<void> updateOrderStatus(
+    String orderId,
+    String status, {
+    required RiderDriver driver,
+  }) async {
     if (status != 'completed' && status != 'delivered') return;
     final trackingResponse = await _httpClient
         .get(
@@ -1341,6 +1360,7 @@ class RiderApiClient {
     final response = await _httpClient
         .patch(
           _uri('/api/delivery/driver/deliver/$assignmentId'),
+          headers: _jsonHeaders(driver.token),
         )
         .timeout(const Duration(seconds: 15));
     _decode(response);
@@ -1576,6 +1596,7 @@ class RiderDriver {
     required this.color,
     required this.status,
     required this.restaurantId,
+    required this.token,
     this.vehicleLabel = '',
   });
 
@@ -1597,9 +1618,22 @@ class RiderDriver {
       color: '${json['color'] ?? '#3B82F6'}',
       status: '${json['status'] ?? 'offline'}',
       restaurantId: '${json['restaurantId'] ?? 'default'}',
+      token: '${json['token'] ?? ''}',
       vehicleLabel: vehicleLabel,
     );
   }
+
+  RiderDriver withToken(String token) => RiderDriver(
+        id: id,
+        driverId: driverId,
+        name: name,
+        phone: phone,
+        color: color,
+        status: status,
+        restaurantId: restaurantId,
+        token: token,
+        vehicleLabel: vehicleLabel,
+      );
 
   final String id;
   final String driverId;
@@ -1608,6 +1642,7 @@ class RiderDriver {
   final String color;
   final String status;
   final String restaurantId;
+  final String token;
   final String vehicleLabel;
 }
 
