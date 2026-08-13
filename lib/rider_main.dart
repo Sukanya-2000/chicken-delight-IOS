@@ -16,7 +16,7 @@ class ChickenDelightRiderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
-        title: 'Chicken Delight Rider',
+        title: 'Rider',
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(
@@ -57,6 +57,12 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
   RiderDriver? _driver;
   RiderBranch? _branch;
 
+  RiderApiClient get _activeApiClient {
+    final apiUrl = _branch?.apiUrl;
+    if (apiUrl == null || apiUrl.trim().isEmpty) return widget.apiClient;
+    return widget.apiClient.withBaseUrl(apiUrl);
+  }
+
   @override
   Widget build(BuildContext context) {
     final driver = _driver;
@@ -64,18 +70,19 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
       final branch = _branch;
       if (branch == null) {
         return RiderRestaurantSelectScreen(
+          apiClient: widget.apiClient,
           onBranchSelected: (value) => setState(() => _branch = value),
         );
       }
       return RiderAuthScreen(
-        apiClient: widget.apiClient,
+        apiClient: _activeApiClient,
         branch: branch,
         onChangeBranch: () => setState(() => _branch = null),
         onAuthenticated: (value) => setState(() => _driver = value),
       );
     }
     return RiderHomeScreen(
-      apiClient: widget.apiClient,
+      apiClient: _activeApiClient,
       driver: driver,
       onDriverChanged: (value) => setState(() => _driver = value),
       onLogout: () => setState(() {
@@ -89,9 +96,11 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
 class RiderRestaurantSelectScreen extends StatefulWidget {
   const RiderRestaurantSelectScreen({
     super.key,
+    required this.apiClient,
     required this.onBranchSelected,
   });
 
+  final RiderApiClient apiClient;
   final ValueChanged<RiderBranch> onBranchSelected;
 
   @override
@@ -119,10 +128,8 @@ class _RiderRestaurantSelectScreenState
           {'key': _savedBranchesKey},
         ) ??
         const <String>[];
-    final loaded = rawBranches
-        .map(RiderBranch.tryParse)
-        .whereType<RiderBranch>()
-        .toList();
+    final loaded =
+        rawBranches.map(RiderBranch.tryParse).whereType<RiderBranch>().toList();
     if (!mounted) return;
     setState(() {
       branches = loaded;
@@ -130,11 +137,7 @@ class _RiderRestaurantSelectScreenState
     });
   }
 
-  Future<void> _saveBranch(RiderBranch branch) async {
-    final next = [
-      branch,
-      ...branches.where((saved) => saved.id != branch.id),
-    ];
+  Future<void> _persistBranches(List<RiderBranch> next) async {
     await _storageChannel.invokeMethod<void>(
       'setStringList',
       {
@@ -146,9 +149,43 @@ class _RiderRestaurantSelectScreenState
     setState(() => branches = next);
   }
 
+  Future<void> _saveBranch(RiderBranch branch) async {
+    final next = [
+      branch,
+      ...branches.where((saved) => saved.id != branch.id),
+    ];
+    await _persistBranches(next);
+  }
+
+  Future<void> _deleteBranch(RiderBranch branch) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete restaurant?'),
+        content: Text('Remove ${branch.label} from saved restaurants?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _persistBranches(
+      branches.where((saved) => saved.id != branch.id).toList(),
+    );
+  }
+
   Future<void> _scan(BuildContext context) async {
     final branch = await Navigator.of(context).push<RiderBranch>(
-      MaterialPageRoute(builder: (_) => const RiderQrScannerScreen()),
+      MaterialPageRoute(
+        builder: (_) => RiderQrScannerScreen(apiClient: widget.apiClient),
+      ),
     );
     if (branch == null) return;
     await _saveBranch(branch);
@@ -193,16 +230,30 @@ class _RiderRestaurantSelectScreenState
                       ...branches.map(
                         (branch) => Padding(
                           padding: const EdgeInsets.only(bottom: 12),
-                          child: OutlinedButton.icon(
-                            onPressed: () => widget.onBranchSelected(branch),
-                            icon: const Icon(Icons.restaurant_outlined),
-                            label: Text(branch.label),
-                            style: OutlinedButton.styleFrom(
-                              alignment: Alignment.centerLeft,
-                              minimumSize: const Size(0, 54),
-                              textStyle:
-                                  const TextStyle(fontWeight: FontWeight.w900),
-                            ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () =>
+                                      widget.onBranchSelected(branch),
+                                  icon: const Icon(Icons.restaurant_outlined),
+                                  label: Text(branch.label),
+                                  style: OutlinedButton.styleFrom(
+                                    alignment: Alignment.centerLeft,
+                                    minimumSize: const Size(0, 54),
+                                    textStyle: const TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              IconButton.filledTonal(
+                                tooltip: 'Delete restaurant',
+                                onPressed: () => _deleteBranch(branch),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -223,7 +274,9 @@ class _RiderRestaurantSelectScreenState
 }
 
 class RiderQrScannerScreen extends StatefulWidget {
-  const RiderQrScannerScreen({super.key});
+  const RiderQrScannerScreen({super.key, this.apiClient});
+
+  final RiderApiClient? apiClient;
 
   @override
   State<RiderQrScannerScreen> createState() => _RiderQrScannerScreenState();
@@ -231,13 +284,23 @@ class RiderQrScannerScreen extends StatefulWidget {
 
 class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
   final controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
+    detectionSpeed: DetectionSpeed.normal,
     facing: CameraFacing.back,
+    formats: const [BarcodeFormat.qrCode],
   );
+  StreamSubscription<BarcodeCapture>? _barcodeSubscription;
   bool handled = false;
+  bool verifying = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _barcodeSubscription = controller.barcodes.listen(_handleDetect);
+  }
 
   @override
   void dispose() {
+    _barcodeSubscription?.cancel();
     controller.dispose();
     super.dispose();
   }
@@ -250,11 +313,34 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
         .firstWhere((value) => value.trim().isNotEmpty, orElse: () => '');
     if (rawValue.isEmpty) return;
 
-    final branch = RiderBranch.tryParse(rawValue);
+    _resolveQr(rawValue);
+  }
+
+  Future<void> _resolveQr(String rawValue) async {
+    final branch = RiderBranch.tryParseAny(rawValue);
     if (branch == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Scan a valid restaurant QR code.')),
-      );
+      handled = true;
+      if (mounted) setState(() => verifying = true);
+      try {
+        final verifiedBranch = await (widget.apiClient ?? RiderApiClient())
+            .verifyStoreQr(rawValue);
+        if (!mounted) return;
+        Navigator.of(context).pop(verifiedBranch);
+      } catch (_) {
+        final signedBranch = RiderBranch.tryParseAny(rawValue);
+        if (signedBranch != null) {
+          if (!mounted) return;
+          Navigator.of(context).pop(signedBranch);
+          return;
+        }
+        if (!mounted) return;
+        await _showInvalidQr(rawValue);
+        if (!mounted) return;
+        setState(() {
+          handled = false;
+          verifying = false;
+        });
+      }
       return;
     }
 
@@ -262,8 +348,42 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
     Navigator.of(context).pop(branch);
   }
 
+  Future<void> _showInvalidQr(String rawValue) async {
+    final preview =
+        rawValue.length > 420 ? '${rawValue.substring(0, 420)}...' : rawValue;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('QR not recognized'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            preview.isEmpty ? '(empty scan)' : preview,
+            style: const TextStyle(fontSize: 12),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: rawValue));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Scanned QR copied.')),
+              );
+            },
+            child: const Text('Copy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Scan again'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _enterQrData() async {
     final controller = TextEditingController();
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
     final rawValue = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -274,7 +394,7 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
           maxLines: 4,
           autofocus: true,
           decoration: const InputDecoration(
-            hintText: '{"branchId":"...","branchName":"..."}',
+            hintText: 'Paste QR token, URL, or restaurant JSON',
           ),
         ),
         actions: [
@@ -292,14 +412,22 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
     controller.dispose();
     if (rawValue == null || rawValue.trim().isEmpty || !mounted) return;
 
-    final branch = RiderBranch.tryParse(rawValue);
+    var branch = RiderBranch.tryParseAny(rawValue);
     if (branch == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      try {
+        branch = await (widget.apiClient ?? RiderApiClient())
+            .verifyStoreQr(rawValue);
+      } catch (_) {
+        branch = RiderBranch.tryParseAny(rawValue);
+      }
+    }
+    if (branch == null) {
+      messenger.showSnackBar(
         const SnackBar(content: Text('Enter a valid restaurant QR code.')),
       );
       return;
     }
-    Navigator.of(context).pop(branch);
+    navigator.pop(branch);
   }
 
   @override
@@ -308,10 +436,7 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
         body: Stack(
           fit: StackFit.expand,
           children: [
-            MobileScanner(
-              controller: controller,
-              onDetect: _handleDetect,
-            ),
+            MobileScanner(controller: controller),
             Center(
               child: Container(
                 width: 260,
@@ -327,10 +452,35 @@ class _RiderQrScannerScreenState extends State<RiderQrScannerScreen> {
               right: 24,
               bottom: 32,
               child: SafeArea(
-                child: FilledButton.icon(
-                  onPressed: _enterQrData,
-                  icon: const Icon(Icons.keyboard_alt_outlined),
-                  label: const Text('Enter QR data'),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (verifying) ...[
+                      const Card(
+                        child: Padding(
+                          padding: EdgeInsets.all(12),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox.square(
+                                dimension: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                              SizedBox(width: 10),
+                              Text('Verifying QR...'),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    FilledButton.icon(
+                      onPressed: verifying ? null : _enterQrData,
+                      icon: const Icon(Icons.keyboard_alt_outlined),
+                      label: const Text('Enter QR data'),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -394,7 +544,7 @@ class _RiderAuthScreenState extends State<RiderAuthScreen> {
                       ),
                       const SizedBox(height: 18),
                       Text(
-                        'Chicken Delight Rider',
+                        'Rider',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.headlineSmall,
                       ),
@@ -1013,6 +1163,12 @@ class RiderApiClient {
   final http.Client _httpClient;
   final String baseUrl;
 
+  RiderApiClient withBaseUrl(String nextBaseUrl) {
+    final normalized = nextBaseUrl.trim();
+    if (normalized.isEmpty || normalized == baseUrl) return this;
+    return RiderApiClient(httpClient: _httpClient, baseUrl: normalized);
+  }
+
   Uri _uri(String path, [Map<String, String>? query]) {
     final uri = Uri.parse('$baseUrl$path');
     return query == null ? uri : uri.replace(queryParameters: query);
@@ -1023,15 +1179,17 @@ class RiderApiClient {
     required String password,
     required String branchId,
   }) async {
-    final response = await _httpClient.post(
-      _uri('/api/delivery/driver/login'),
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'driverId': driverId,
-        'password': password,
-        'branchId': branchId,
-      }),
-    ).timeout(const Duration(seconds: 15));
+    final response = await _httpClient
+        .post(
+          _uri('/api/delivery/driver/login'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'driverId': driverId,
+            'password': password,
+            'branchId': branchId,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
     final body = _decode(response);
     final data = body['data'];
     if (data is! Map<String, dynamic>) {
@@ -1040,12 +1198,36 @@ class RiderApiClient {
     return RiderDriver.fromJson(data);
   }
 
+  Future<RiderBranch> verifyStoreQr(String qrToken) async {
+    final qrApiUrl = RiderBranch.peekApiUrl(qrToken);
+    final verifier = qrApiUrl == null ? this : withBaseUrl(qrApiUrl);
+    final response = await _httpClient
+        .post(
+          verifier._uri('/api/delivery/driver/verify-qr'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'qrToken': qrToken}),
+        )
+        .timeout(const Duration(seconds: 15));
+    final body = _decode(response);
+    final data = body['data'];
+    if (data is! Map<String, dynamic>) {
+      throw Exception('RMS did not return restaurant details.');
+    }
+    final branch = RiderBranch.fromJson(data);
+    if (branch.id.isEmpty) {
+      throw Exception('RMS did not return restaurant details.');
+    }
+    return branch;
+  }
+
   Future<RiderDriver> updateDriverStatus(String id, String status) async {
-    final response = await _httpClient.patch(
-      _uri('/api/delivery/driver/$id/status'),
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({'status': status}),
-    ).timeout(const Duration(seconds: 15));
+    final response = await _httpClient
+        .patch(
+          _uri('/api/delivery/driver/$id/status'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'status': status}),
+        )
+        .timeout(const Duration(seconds: 15));
     final body = _decode(response);
     final data = body['data'];
     if (data is! Map<String, dynamic>) {
@@ -1059,15 +1241,17 @@ class RiderApiClient {
     required double latitude,
     required double longitude,
   }) async {
-    final response = await _httpClient.post(
-      _uri('/api/delivery/driver/$id/location'),
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'lat': latitude,
-        'lng': longitude,
-        'phase': 'available',
-      }),
-    ).timeout(const Duration(seconds: 8));
+    final response = await _httpClient
+        .post(
+          _uri('/api/delivery/driver/$id/location'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'lat': latitude,
+            'lng': longitude,
+            'phase': 'available',
+          }),
+        )
+        .timeout(const Duration(seconds: 8));
     _decode(response);
   }
 
@@ -1093,9 +1277,11 @@ class RiderApiClient {
   }
 
   Future<List<RiderOrder>> fetchDriverAssignments(String driverId) async {
-    final response = await _httpClient.get(
-      _uri('/api/delivery/driver/$driverId/assignments'),
-    ).timeout(const Duration(seconds: 15));
+    final response = await _httpClient
+        .get(
+          _uri('/api/delivery/driver/$driverId/assignments'),
+        )
+        .timeout(const Duration(seconds: 15));
     final body = _decode(response);
     final data = body['data'];
     final orders = data is List
@@ -1108,9 +1294,11 @@ class RiderApiClient {
   }
 
   Future<RiderActivityReport> fetchDriverActivity(String driverId) async {
-    final response = await _httpClient.get(
-      _uri('/api/delivery/driver/$driverId/activity'),
-    ).timeout(const Duration(seconds: 15));
+    final response = await _httpClient
+        .get(
+          _uri('/api/delivery/driver/$driverId/activity'),
+        )
+        .timeout(const Duration(seconds: 15));
     final body = _decode(response);
     final data = body['data'];
     if (data is! Map<String, dynamic>) return const RiderActivityReport.empty();
@@ -1135,9 +1323,11 @@ class RiderApiClient {
 
   Future<void> updateOrderStatus(String orderId, String status) async {
     if (status != 'completed' && status != 'delivered') return;
-    final trackingResponse = await _httpClient.get(
-      _uri('/api/delivery/track/$orderId'),
-    ).timeout(const Duration(seconds: 15));
+    final trackingResponse = await _httpClient
+        .get(
+          _uri('/api/delivery/track/$orderId'),
+        )
+        .timeout(const Duration(seconds: 15));
     final trackingBody = _decode(trackingResponse);
     final tracking = trackingBody['data'];
     if (tracking is! Map<String, dynamic> || tracking['assigned'] != true) {
@@ -1148,9 +1338,11 @@ class RiderApiClient {
     if (assignmentId.isEmpty) {
       throw Exception('Delivery assignment was not returned by RMS.');
     }
-    final response = await _httpClient.patch(
-      _uri('/api/delivery/driver/deliver/$assignmentId'),
-    ).timeout(const Duration(seconds: 15));
+    final response = await _httpClient
+        .patch(
+          _uri('/api/delivery/driver/deliver/$assignmentId'),
+        )
+        .timeout(const Duration(seconds: 15));
     _decode(response);
   }
 
@@ -1182,41 +1374,174 @@ class RiderBranch {
     required this.id,
     required this.name,
     required this.code,
+    this.apiUrl,
   });
 
   factory RiderBranch.fromJson(Map<String, dynamic> json) => RiderBranch(
-        id: '${json['branchId'] ?? json['_id'] ?? json['id'] ?? ''}'.trim(),
-        name: '${json['branchName'] ?? json['name'] ?? ''}'.trim(),
+        id: '${json['branchId'] ?? json['restaurantId'] ?? json['_id'] ?? json['id'] ?? ''}'
+            .trim(),
+        name:
+            '${json['branchName'] ?? json['restaurantName'] ?? json['name'] ?? ''}'
+                .trim(),
         code: '${json['branchCode'] ?? json['code'] ?? ''}'.trim(),
+        apiUrl: _normalizeApiUrl('${json['apiUrl'] ?? json['baseUrl'] ?? ''}'),
       );
 
   Map<String, dynamic> toJson() => {
         'branchId': id,
         'branchName': name,
         'branchCode': code,
+        if (apiUrl != null && apiUrl!.isNotEmpty) 'apiUrl': apiUrl,
       };
 
   static RiderBranch? tryParse(String rawValue) {
-    final text = rawValue.trim();
-    if (text.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) {
-        final branch = RiderBranch.fromJson(decoded);
-        return branch.id.isEmpty ? null : branch;
-      }
-    } catch (_) {
-      final uri = Uri.tryParse(text);
-      final branchId = uri?.queryParameters['branchId'];
-      if (branchId != null && branchId.trim().isNotEmpty) {
-        return RiderBranch(
-          id: branchId.trim(),
-          name: uri?.queryParameters['branchName']?.trim() ?? '',
-          code: uri?.queryParameters['branchCode']?.trim() ?? '',
-        );
+    for (final text in _qrCandidates(rawValue)) {
+      try {
+        final decoded = jsonDecode(text);
+        if (decoded is Map<String, dynamic>) {
+          final branch = RiderBranch.fromJson(decoded);
+          if (branch.id.isNotEmpty) return branch;
+        }
+      } catch (_) {
+        final branch = _tryParseBranchUri(text);
+        if (branch != null) return branch;
       }
     }
     return null;
+  }
+
+  static RiderBranch? tryParseAny(String rawValue) =>
+      tryParse(rawValue) ?? tryParseSignedQr(rawValue);
+
+  static RiderBranch? tryParseSignedQr(String rawValue) {
+    for (final text in _qrCandidates(rawValue)) {
+      final payload = _tryDecodeSignedQrPayload(text);
+      if (payload == null) continue;
+      final branch = RiderBranch.fromJson(payload);
+      if (branch.id.isNotEmpty) return branch;
+    }
+    return null;
+  }
+
+  static String? peekApiUrl(String rawValue) {
+    final parsed = tryParseAny(rawValue);
+    if (parsed?.apiUrl != null && parsed!.apiUrl!.trim().isNotEmpty) {
+      return parsed.apiUrl;
+    }
+    for (final text in _qrCandidates(rawValue)) {
+      final apiUrl = _normalizeApiUrl(
+        _tryDecodeSignedQrPayload(text)?['apiUrl']?.toString() ?? '',
+      );
+      if (apiUrl != null && apiUrl.isNotEmpty) return apiUrl;
+    }
+    return null;
+  }
+
+  static RiderBranch? _tryParseBranchUri(String text) {
+    final uri = Uri.tryParse(text);
+    final branchId = uri?.queryParameters['branchId'] ??
+        uri?.queryParameters['restaurantId'];
+    if (branchId == null || branchId.trim().isEmpty) return null;
+    return RiderBranch(
+      id: branchId.trim(),
+      name: (uri?.queryParameters['branchName'] ??
+                  uri?.queryParameters['restaurantName'])
+              ?.trim() ??
+          '',
+      code: uri?.queryParameters['branchCode']?.trim() ?? '',
+      apiUrl: _normalizeApiUrl(uri?.queryParameters['apiUrl'] ?? ''),
+    );
+  }
+
+  static List<String> _qrCandidates(String rawValue) {
+    final seen = <String>{};
+    final queue = <String>[rawValue];
+    final candidates = <String>[];
+    while (queue.isNotEmpty && candidates.length < 24) {
+      final current = _cleanQrText(queue.removeAt(0));
+      if (current.isEmpty || !seen.add(current)) continue;
+      candidates.add(current);
+
+      try {
+        final decoded = Uri.decodeComponent(current);
+        if (decoded != current) queue.add(decoded);
+      } catch (_) {}
+
+      try {
+        final decodedJson = jsonDecode(current);
+        if (decodedJson is Map<String, dynamic>) {
+          for (final key in const [
+            'data',
+            'qr',
+            'qrToken',
+            'qrCodePayload',
+            'token',
+            'payload',
+            'code',
+          ]) {
+            final value = decodedJson[key];
+            if (value is String && value.trim().isNotEmpty) queue.add(value);
+          }
+        }
+      } catch (_) {}
+
+      final uri = Uri.tryParse(current);
+      if (uri != null) {
+        for (final key in const [
+          'data',
+          'qr',
+          'qrToken',
+          'token',
+          'payload',
+          'code',
+        ]) {
+          final value = uri.queryParameters[key];
+          if (value != null && value.trim().isNotEmpty) queue.add(value);
+        }
+      }
+    }
+    return candidates;
+  }
+
+  static String _cleanQrText(String value) {
+    var text = value.trim().replaceAll(RegExp(r'[\r\n]+'), '');
+    text = text.replaceAll(RegExp(r'''^["']|["']$'''), '');
+    return text.trim();
+  }
+
+  static Map<String, dynamic>? _tryDecodeSignedQrPayload(String text) {
+    final clean = _cleanQrText(text);
+    final parts = clean.split('.');
+    if (parts.length != 2 || parts.first.isEmpty) return null;
+    try {
+      final normalized = base64Url.normalize(parts.first);
+      final decoded = utf8.decode(base64Url.decode(normalized));
+      final payload = jsonDecode(decoded);
+      return payload is Map<String, dynamic> ? payload : null;
+    } catch (_) {
+      try {
+        final normalized = base64.normalize(parts.first);
+        final decoded = utf8.decode(base64.decode(normalized));
+        final payload = jsonDecode(decoded);
+        return payload is Map<String, dynamic> ? payload : null;
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  static String? _normalizeApiUrl(String value) {
+    final text = value.trim();
+    if (text.isEmpty) return null;
+    final uri = Uri.tryParse(text);
+    if (uri != null && (uri.host == 'localhost' || uri.host == '127.0.0.1')) {
+      final emulatorUri = uri.replace(host: '10.0.2.2');
+      final emulatorText = emulatorUri.toString();
+      return emulatorText.endsWith('/api')
+          ? emulatorText.substring(0, emulatorText.length - 4)
+          : emulatorText;
+    }
+    return text.endsWith('/api') ? text.substring(0, text.length - 4) : text;
   }
 
   String get label {
@@ -1229,6 +1554,7 @@ class RiderBranch {
   final String id;
   final String name;
   final String code;
+  final String? apiUrl;
 }
 
 class RiderLocationFix {
@@ -1322,9 +1648,8 @@ class RiderActivityStats {
   final Duration averageDeliveryTime;
 
   factory RiderActivityStats.fromDeliveredOrders(List<RiderOrder> orders) {
-    final deliveredOrders = orders
-        .where((order) => order.countsTowardActivity)
-        .toList();
+    final deliveredOrders =
+        orders.where((order) => order.countsTowardActivity).toList();
     return RiderActivityStats(
       deliveriesToday: deliveredOrders.length,
       totalValue:
@@ -1348,7 +1673,8 @@ class RiderActivityStats {
 
   RiderActivityStats addOrder(RiderOrder order) {
     final nextDeliveriesToday = deliveriesToday + 1;
-    final orderDeliveryTime = RiderActivityStats.averageDeliveryTimeFor([order]);
+    final orderDeliveryTime =
+        RiderActivityStats.averageDeliveryTimeFor([order]);
     final nextAverageDeliveryTime = orderDeliveryTime == Duration.zero
         ? averageDeliveryTime
         : averageDeliveryTime == Duration.zero
@@ -1585,7 +1911,7 @@ class _RiderHeader extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Chicken Delight Rider',
+                    Text('Rider',
                         style: Theme.of(context).textTheme.headlineSmall),
                     if (driver.name.trim().isNotEmpty ||
                         driver.driverId.trim().isNotEmpty)
