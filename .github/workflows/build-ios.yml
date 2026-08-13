@@ -100,6 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           perl -0pi -e 's/PRODUCT_BUNDLE_IDENTIFIER = com\.chickendelight\.rider;/PRODUCT_BUNDLE_IDENTIFIER = $ENV{APP_BUNDLE_ID};/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -0pi -e 's/PRODUCT_DISPLAY_NAME = Rider;/PRODUCT_DISPLAY_NAME = "Chicken Delight";/g' ios/Runner.xcodeproj/project.pbxproj
           perl -0pi -e 's/PROVISIONING_PROFILE_SPECIFIER = "Chicken Delight Rider App Store";/PROVISIONING_PROFILE_SPECIFIER = "$ENV{PROFILE_NAME}";/g' ios/Runner.xcodeproj/project.pbxproj
 
       - name: Build signed user iOS app
