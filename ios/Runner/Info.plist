@@ -31,9 +31,9 @@
 		<string>comgooglemaps</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Chicken Delight uses your location to find nearby stores and delivery options.</string>
+	<string>Rider uses your location to update delivery status and open directions.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Chicken Delight Rider uses the camera to scan restaurant QR codes.</string>
+	<string>Rider uses the camera to scan restaurant QR codes.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
