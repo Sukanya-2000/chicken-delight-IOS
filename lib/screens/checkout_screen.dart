@@ -178,7 +178,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
               content: Text(
-                  'Please select a restaurant and add an item before placing your order.')),
+                  'Please select a Pizza Hut branch and add an item before placing your order.')),
         );
         setState(() => submitting = false);
         return;
@@ -216,9 +216,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   String? validateCardExpiry(String? value) {
-    final match =
-        RegExp(r'^\s*(0[1-9]|1[0-2])\s*/\s*(\d{2}|\d{4})\s*$')
-            .firstMatch(value ?? '');
+    final match = RegExp(r'^\s*(0[1-9]|1[0-2])\s*/\s*(\d{2}|\d{4})\s*$')
+        .firstMatch(value ?? '');
     if (match == null) return 'Use MM/YY';
 
     final month = int.parse(match.group(1)!);

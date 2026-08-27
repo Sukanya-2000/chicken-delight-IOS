@@ -32,8 +32,14 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Rider uses your location to update delivery status and open directions.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Rider uses your location to keep delivery tracking active while you are on the road.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Rider uses the camera to scan restaurant QR codes.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

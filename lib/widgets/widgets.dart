@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../app_config.dart';
 import '../models/models.dart';
 
 final currency = NumberFormat.currency(symbol: r'$');
@@ -29,53 +30,82 @@ class StoreCard extends StatelessWidget {
   const StoreCard({super.key, required this.store, required this.onTap});
   final Store store;
   final VoidCallback onTap;
+
   @override
   Widget build(BuildContext context) => Card(
-      margin: const EdgeInsets.only(bottom: 14),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
+        margin: const EdgeInsets.only(bottom: 14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
           onTap: store.isOpen ? onTap : null,
           child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Row(children: [
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              children: [
                 CircleAvatar(
-                    radius: 28,
-                    backgroundColor: Theme.of(context).colorScheme.secondary,
-                    child: const Icon(Icons.storefront, size: 30)),
+                  radius: 28,
+                  backgroundColor: Theme.of(context).colorScheme.secondary,
+                  child: const Icon(Icons.storefront, size: 30),
+                ),
                 const SizedBox(width: 14),
                 Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
                         children: [
-                      Text(store.name,
-                          style: Theme.of(context).textTheme.titleMedium),
+                          Expanded(
+                            child: Text(store.name,
+                                style: Theme.of(context).textTheme.titleMedium),
+                          ),
+                          if (store.code.isNotEmpty)
+                            Text(
+                              store.code,
+                              style: const TextStyle(
+                                  fontSize: 11, fontWeight: FontWeight.w900),
+                            ),
+                        ],
+                      ),
                       const SizedBox(height: 5),
-                      Text(store.address),
-                      const SizedBox(height: 5),
-                      Row(children: [
-                        const Icon(Icons.phone_outlined, size: 16),
-                        const SizedBox(width: 5),
-                        Text(store.phone,
-                            style: const TextStyle(
-                                fontSize: 12, fontWeight: FontWeight.w600)),
-                      ]),
+                      Text([store.address, store.city]
+                          .where((part) => part.trim().isNotEmpty)
+                          .join(', ')),
+                      if (store.phone.isNotEmpty) ...[
+                        const SizedBox(height: 5),
+                        Row(children: [
+                          const Icon(Icons.phone_outlined, size: 16),
+                          const SizedBox(width: 5),
+                          Text(store.phone,
+                              style: const TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.w600)),
+                        ]),
+                      ],
                       const SizedBox(height: 8),
-                      Row(children: [
-                        Text(store.isOpen ? 'Open now' : 'Closed',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color:
-                                    store.isOpen ? Colors.green : Colors.red)),
-                        Expanded(
-                            child: Text(
-                                '  •  ${store.distance}  •  ${store.eta}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 12)))
-                      ])
-                    ])),
-                const Icon(Icons.chevron_right)
-              ]))));
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          Text(store.isOpen ? 'Open now' : 'Closed',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: store.isOpen
+                                      ? Colors.green
+                                      : Colors.red)),
+                          Text(store.distance,
+                              style: const TextStyle(fontSize: 12)),
+                          Text(store.eta, style: const TextStyle(fontSize: 12)),
+                          Text('Delivery ${currency.format(store.deliveryFee)}',
+                              style: const TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
 class MenuItemCard extends StatelessWidget {
@@ -152,7 +182,7 @@ class MenuItemImage extends StatelessWidget {
         return Container(
           width: size,
           height: size,
-          color: Colors.amber.shade50,
+          color: AppConfig.surfaceColor,
           alignment: Alignment.center,
           child: const SizedBox.square(
             dimension: 22,
@@ -177,7 +207,7 @@ class _MenuImagePlaceholder extends StatelessWidget {
   Widget build(BuildContext context) => Container(
         width: size,
         height: size,
-        color: Colors.amber.shade100,
+        color: AppConfig.selectedColor,
         child: const Icon(Icons.fastfood, size: 42),
       );
 }
@@ -209,6 +239,6 @@ class LoadingCards extends StatelessWidget {
           height: 115,
           margin: const EdgeInsets.only(bottom: 14),
           decoration: BoxDecoration(
-              color: Colors.grey.shade200,
+              color: AppConfig.borderColor.withValues(alpha: .35),
               borderRadius: BorderRadius.circular(18))));
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../app_config.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../widgets/widgets.dart';
@@ -47,7 +48,7 @@ class _MenuScreenState extends State<MenuScreen> {
 
     if (store == null) {
       return const Scaffold(
-          body: Center(child: Text('Choose a restaurant first.')));
+          body: Center(child: Text('Choose a Pizza Hut first.')));
     }
 
     return Scaffold(
@@ -219,7 +220,7 @@ class _MenuScreenState extends State<MenuScreen> {
           : FilledButton.icon(
               style: FilledButton.styleFrom(
                   minimumSize: const Size(270, 56),
-                  backgroundColor: Colors.black),
+                  backgroundColor: AppConfig.textColor),
               onPressed: () => context.push('/cart'),
               icon: Badge(
                   label: Text('${state.itemCount}'),
@@ -505,7 +506,7 @@ Future<void> showItemSheet(BuildContext context, MenuItem item) async {
             const SizedBox(height: 16),
             FilledButton(
               style: FilledButton.styleFrom(
-                  disabledBackgroundColor: Colors.grey.shade300),
+                  disabledBackgroundColor: AppConfig.borderColor),
               onPressed: !valid()
                   ? null
                   : () {

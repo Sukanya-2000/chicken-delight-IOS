@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,10 +11,17 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'services/rms_http_client.dart';
 
-void main() => runApp(const ChickenDelightRiderApp());
+void main() => runApp(const PizzaHutRiderApp());
 
-class ChickenDelightRiderApp extends StatelessWidget {
-  const ChickenDelightRiderApp({super.key});
+@pragma('vm:entry-point')
+Future<void> riderBackgroundMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+  await RiderBackgroundTracker().run();
+}
+
+class PizzaHutRiderApp extends StatelessWidget {
+  const PizzaHutRiderApp({super.key});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -54,8 +64,18 @@ class RiderAuthGate extends StatefulWidget {
 }
 
 class _RiderAuthGateState extends State<RiderAuthGate> {
+  static const _savedSessionKey = 'rider_saved_session';
+  static const _storageChannel =
+      MethodChannel('com.example.pizza_hut/rider_storage');
   RiderDriver? _driver;
   RiderBranch? _branch;
+  bool _loadingSession = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreSession();
+  }
 
   RiderApiClient get _activeApiClient {
     final apiUrl = _branch?.apiUrl;
@@ -63,8 +83,100 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
     return widget.apiClient.withBaseUrl(apiUrl);
   }
 
+  Future<void> _restoreSession() async {
+    try {
+      final values = await _storageChannel.invokeListMethod<String>(
+            'getStringList',
+            {'key': _savedSessionKey},
+          ) ??
+          const <String>[];
+      if (values.isNotEmpty) {
+        final decoded = jsonDecode(values.first);
+        if (decoded is Map<String, dynamic>) {
+          final branchJson = decoded['branch'];
+          final driverJson = decoded['driver'];
+          final branch = branchJson is Map<String, dynamic>
+              ? RiderBranch.fromJson(branchJson)
+              : null;
+          final driver = driverJson is Map<String, dynamic>
+              ? RiderDriver.fromJson(driverJson)
+              : null;
+          if (driver != null && driver.id.trim().isNotEmpty) {
+            _branch = branch;
+            _driver = driver;
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore corrupt saved sessions and show the normal login flow.
+    }
+    if (!mounted) return;
+    setState(() => _loadingSession = false);
+  }
+
+  Future<void> _persistSession({
+    required RiderBranch? branch,
+    required RiderDriver? driver,
+  }) async {
+    if (driver == null) {
+      await _storageChannel.invokeMethod<void>(
+        'setStringList',
+        {'key': _savedSessionKey, 'values': const <String>[]},
+      );
+      return;
+    }
+    await _storageChannel.invokeMethod<void>(
+      'setStringList',
+      {
+        'key': _savedSessionKey,
+        'values': [
+          jsonEncode({
+            if (branch != null) 'branch': branch.toJson(),
+            'driver': driver.toJson(),
+          }),
+        ],
+      },
+    );
+  }
+
+  void _setAuthenticated(RiderBranch branch, RiderDriver driver) {
+    setState(() {
+      _branch = branch;
+      _driver = driver;
+    });
+    unawaited(_persistSession(branch: branch, driver: driver));
+  }
+
+  void _setDriver(RiderDriver driver) {
+    setState(() => _driver = driver);
+    unawaited(_persistSession(branch: _branch, driver: driver));
+  }
+
+  Future<void> _logout() async {
+    final driver = _driver;
+    final apiClient = _activeApiClient;
+    await _persistSession(branch: null, driver: null);
+    if (driver != null) {
+      try {
+        await apiClient.updateDriverStatus(driver, 'offline');
+      } catch (_) {
+        // Local logout should still complete if RMS is temporarily unreachable.
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _driver = null;
+      _branch = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_loadingSession) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
     final driver = _driver;
     if (driver == null) {
       final branch = _branch;
@@ -78,17 +190,15 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
         apiClient: _activeApiClient,
         branch: branch,
         onChangeBranch: () => setState(() => _branch = null),
-        onAuthenticated: (value) => setState(() => _driver = value),
+        onAuthenticated: (value) => _setAuthenticated(branch, value),
       );
     }
     return RiderHomeScreen(
       apiClient: _activeApiClient,
+      branch: _branch,
       driver: driver,
-      onDriverChanged: (value) => setState(() => _driver = value),
-      onLogout: () => setState(() {
-        _driver = null;
-        _branch = null;
-      }),
+      onDriverChanged: _setDriver,
+      onLogout: () => unawaited(_logout()),
     );
   }
 }
@@ -112,7 +222,7 @@ class _RiderRestaurantSelectScreenState
     extends State<RiderRestaurantSelectScreen> {
   static const _savedBranchesKey = 'rider_saved_restaurants';
   static const _storageChannel =
-      MethodChannel('com.example.chicken_delight/rider_storage');
+      MethodChannel('com.example.pizza_hut/rider_storage');
   List<RiderBranch> branches = const <RiderBranch>[];
   bool loading = true;
 
@@ -509,7 +619,7 @@ class RiderAuthScreen extends StatefulWidget {
 
 class _RiderAuthScreenState extends State<RiderAuthScreen> {
   static const _locationChannel =
-      MethodChannel('com.example.chicken_delight/location');
+      MethodChannel('com.example.pizza_hut/location');
   final form = GlobalKey<FormState>();
   final driverId = TextEditingController();
   final password = TextEditingController();
@@ -616,14 +726,15 @@ class _RiderAuthScreenState extends State<RiderAuthScreen> {
     if (currentForm == null || !currentForm.validate()) return;
     setState(() => submitting = true);
     try {
-      final driver = await widget.apiClient.loginDriver(
+      var driver = (await widget.apiClient.loginDriver(
         driverId: driverId.text.trim(),
         password: password.text,
         branchId: widget.branch.id,
-      );
+      ))
+          .withRestaurantId(widget.branch.id);
       try {
         final location = await _requestLocation().timeout(
-          const Duration(seconds: 8),
+          const Duration(seconds: 25),
         );
         await widget.apiClient.tryUpdateDriverLocation(
           driver,
@@ -680,12 +791,14 @@ class RiderHomeScreen extends StatefulWidget {
   const RiderHomeScreen({
     super.key,
     required this.apiClient,
+    required this.branch,
     required this.driver,
     required this.onDriverChanged,
     required this.onLogout,
   });
 
   final RiderApiClient apiClient;
+  final RiderBranch? branch;
   final RiderDriver driver;
   final ValueChanged<RiderDriver> onDriverChanged;
   final VoidCallback onLogout;
@@ -695,31 +808,146 @@ class RiderHomeScreen extends StatefulWidget {
 }
 
 class _RiderHomeScreenState extends State<RiderHomeScreen> {
+  static const _locationChannel =
+      MethodChannel('com.example.pizza_hut/location');
+  static const _storageChannel =
+      MethodChannel('com.example.pizza_hut/rider_storage');
+  static const _activityStoragePrefix = 'rider_delivered_orders';
   final List<RiderOrder> _orders = [];
   final List<RiderOrder> _activityOrders = [];
   final Set<String> _countedActivityOrderIds = {};
+  late final RiderPusherLocationClient _locationPusher;
   Timer? _refreshTimer;
+  Timer? _locationTimer;
   RiderOrder? _selectedOrder;
+  RiderOrder? _lastDeliveredOrder;
   RiderActivityStats _activityStats = const RiderActivityStats.empty();
   int _tabIndex = 0;
   bool _loading = true;
   late bool _online;
+  bool _posCheckedIn = true;
+  bool _posCheckUpdating = false;
   bool _updating = false;
+  bool _backgroundTrackingEnabled = true;
+  Future<void> _activityPersistence = Future<void>.value();
+  String _trackerStatus = 'Tracker starting...';
   String? _error;
 
   @override
   void initState() {
     super.initState();
     _online = widget.driver.status != 'offline';
-    _loadOrders();
+    _locationPusher = RiderPusherLocationClient(
+      baseUrl: widget.apiClient.baseUrl,
+      driver: widget.driver,
+    );
+    _startLocationBroadcasting();
+    unawaited(_ensureDefaultPosCheckIn());
+    unawaited(_startBackgroundTrackingService());
+    unawaited(_initializeRiderData());
     _refreshTimer =
         Timer.periodic(const Duration(seconds: 10), (_) => _loadOrders());
+  }
+
+  Future<void> _initializeRiderData() async {
+    await _loadLocalActivityOrders();
+    await _loadOrders();
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _locationTimer?.cancel();
+    _locationPusher.dispose();
     super.dispose();
+  }
+
+  void _startLocationBroadcasting() {
+    _locationTimer?.cancel();
+    if (!_online) return;
+    _sendLocationUpdate();
+    _locationTimer = Timer.periodic(
+      const Duration(seconds: 6),
+      (_) => _sendLocationUpdate(),
+    );
+  }
+
+  Future<void> _startBackgroundTrackingService() async {
+    if (!_online || !_backgroundTrackingEnabled) return;
+    try {
+      await _locationChannel.invokeMethod<bool>(
+        'ensureBackgroundTrackingPermission',
+      );
+      await _locationChannel.invokeMethod<void>(
+        'startRiderTrackingService',
+        {
+          'driverName': widget.driver.name,
+          'phase': _currentTrackingPhase,
+          'activeOrderCount': _orders.length,
+        },
+      );
+      if (mounted) {
+        setState(() => _trackerStatus = 'Background tracker active');
+      }
+    } catch (_) {
+      // Older installs still use the Flutter-side tracker if the service is
+      // unavailable for any Android-specific reason.
+    }
+  }
+
+  Future<void> _stopBackgroundTrackingService() async {
+    try {
+      await _locationChannel.invokeMethod<void>('stopRiderTrackingService');
+    } catch (_) {}
+  }
+
+  Future<void> _sendLocationUpdate() async {
+    if (!_online) return;
+    try {
+      final location = await _requestLocation().timeout(
+        const Duration(seconds: 25),
+      );
+      final activeOrderIds = _orders
+          .where((order) => order.shouldShowInDelivery)
+          .map((order) => order.id)
+          .where((id) => id.trim().isNotEmpty)
+          .toSet();
+      _locationPusher.updateActiveOrderIds(activeOrderIds);
+      await _locationPusher.publishLocation(
+        latitude: location.latitude,
+        longitude: location.longitude,
+        phase: _currentTrackingPhase,
+        activeOrderIds: activeOrderIds,
+      );
+      await widget.apiClient.tryUpdateDriverLocation(
+        widget.driver,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      );
+      if (mounted) {
+        final time = TimeOfDay.now().format(context);
+        setState(() => _trackerStatus = 'Location sent at $time');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _trackerStatus = 'Tracker error: $error');
+      }
+    }
+  }
+
+  Future<RiderLocationFix> _requestLocation() async {
+    final result = await _locationChannel.invokeMapMethod<String, dynamic>(
+      'getCurrentLocation',
+    );
+    final latitude = result?['latitude'];
+    final longitude = result?['longitude'];
+    if (latitude is num && longitude is num) {
+      return RiderLocationFix(
+        latitude: latitude.toDouble(),
+        longitude: longitude.toDouble(),
+      );
+    }
+    throw Exception('Could not read rider location.');
   }
 
   Future<void> _loadOrders() async {
@@ -729,23 +957,68 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
     try {
       final orders =
           await widget.apiClient.fetchDriverAssignments(widget.driver);
-      final activity = await widget.apiClient
-          .fetchDriverActivity(widget.driver)
-          .catchError((_) => RiderActivityReport.fromOrders(orders));
-      final localStats = RiderActivityStats.fromDeliveredOrders(orders);
+      final activeOrders =
+          orders.where((order) => order.shouldShowInDelivery).toList();
+      RiderActivityReport activityReport = const RiderActivityReport.empty();
+      try {
+        activityReport = await widget.apiClient.fetchDriverActivity(
+          widget.driver,
+        );
+      } catch (_) {
+        // Assignment refresh must still show active orders if activity is unavailable.
+      }
+      final assignmentDeliveredOrders =
+          orders.where((order) => order.countsTowardActivity).toList();
+      final deliveredOrders = _mergeActivityOrders(
+        activityReport.orders.where((order) => order.countsTowardActivity),
+        assignmentDeliveredOrders,
+      );
+      final activeKeys = _activityKeysFor(activeOrders);
+      final activeFingerprints = _activityFingerprintsFor(activeOrders);
+      final safeDeliveredOrders = deliveredOrders
+          .where(
+            (order) =>
+                !_hasAnyActivityKey(order, activeKeys) &&
+                !_hasAnyActivityFingerprint(order, activeFingerprints),
+          )
+          .toList();
+      final safeLocalDeliveredOrders = _activityOrders
+          .where(
+            (order) =>
+                order.countsTowardActivity &&
+                !_hasAnyActivityKey(order, activeKeys) &&
+                !_hasAnyActivityFingerprint(order, activeFingerprints),
+          )
+          .toList();
+      final visibleDeliveredOrders = _mergeActivityOrders(
+        safeDeliveredOrders,
+        safeLocalDeliveredOrders,
+      );
+      _locationPusher.updateActiveOrderIds(
+        activeOrders.map((order) => order.id),
+      );
       if (!mounted) return;
       setState(() {
         _orders
           ..clear()
-          ..addAll(orders);
-        _rememberActivityOrders(activity.orders);
-        _rememberActivityOrders(orders);
-        _activityStats =
-            _activityStats.mergedWith(activity.stats).mergedWith(localStats);
-        _selectedOrder = _syncSelectedOrder(orders);
+          ..addAll(activeOrders);
+        _forgetActivityOrders(activeKeys);
+        _forgetActivityOrdersByFingerprint(activeFingerprints);
+        _activityOrders
+          ..clear()
+          ..addAll(visibleDeliveredOrders);
+        _countedActivityOrderIds
+          ..clear()
+          ..addAll(_activityOrders.map(_activityIdFor));
+        _activityStats = RiderActivityStats.fromDeliveredOrders(
+          _activityOrders,
+        ).mergedWith(activityReport.stats);
+        _selectedOrder = _syncSelectedOrder(activeOrders);
         _error = null;
         _loading = false;
       });
+      unawaited(_persistLocalActivityOrders());
+      unawaited(_startBackgroundTrackingService());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -753,6 +1026,12 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
         _loading = false;
       });
     }
+  }
+
+  String get _currentTrackingPhase {
+    if (_orders.any((order) => order.isActiveDelivery)) return 'en-route';
+    if (_orders.any((order) => order.isDelivered)) return 'returning';
+    return 'available';
   }
 
   RiderOrder? _syncSelectedOrder(List<RiderOrder> orders) {
@@ -772,9 +1051,25 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
         order.id,
         status,
         driver: widget.driver,
+        assignmentId: order.assignmentId,
       );
       if (status == 'completed' || status == 'delivered') {
-        setState(() => _rememberActivityOrder(order));
+        setState(() {
+          final deliveredOrder =
+              order.copyWith(status: 'delivered', deliveredAt: DateTime.now());
+          _rememberActivityOrder(deliveredOrder);
+          _lastDeliveredOrder = deliveredOrder;
+          _orders.removeWhere(
+            (current) =>
+                current.id == order.id ||
+                (current.assignmentId.isNotEmpty &&
+                    current.assignmentId == order.assignmentId),
+          );
+          _selectedOrder = _syncSelectedOrder(_orders);
+          _activityStats = RiderActivityStats.fromDeliveredOrders(
+            _activityOrders,
+          );
+        });
       }
       await _loadOrders();
     } catch (error) {
@@ -786,19 +1081,134 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
     }
   }
 
-  void _rememberActivityOrders(List<RiderOrder> orders) {
-    for (final order in orders) {
-      if (order.countsTowardActivity) _rememberActivityOrder(order);
-    }
+  Set<String> _activityKeysFor(Iterable<RiderOrder> orders) => {
+        for (final order in orders) ..._activityKeys(order),
+      };
+
+  Set<String> _activityKeys(RiderOrder order) => {
+        if (order.id.trim().isNotEmpty) 'id:${order.id.trim()}',
+        if (order.assignmentId.trim().isNotEmpty)
+          'assignment:${order.assignmentId.trim()}',
+        if (order.number.trim().isNotEmpty) 'number:${order.number.trim()}',
+      };
+
+  bool _hasAnyActivityKey(RiderOrder order, Set<String> keys) =>
+      _activityKeys(order).any(keys.contains);
+
+  Set<String> _activityFingerprintsFor(Iterable<RiderOrder> orders) => {
+        for (final order in orders) ..._activityFingerprints(order),
+      };
+
+  Set<String> _activityFingerprints(RiderOrder order) {
+    final number = _normalizeActivityText(order.number);
+    final customer = _normalizeActivityText(order.customerName);
+    final total = (order.total * 100).round();
+    return {
+      if (number.isNotEmpty) 'number:$number',
+      if (number.isNotEmpty && total > 0) 'number-total:$number:$total',
+      if (number.isNotEmpty && customer.isNotEmpty)
+        'number-customer:$number:$customer',
+    };
+  }
+
+  bool _hasAnyActivityFingerprint(RiderOrder order, Set<String> fingerprints) =>
+      _activityFingerprints(order).any(fingerprints.contains);
+
+  String _normalizeActivityText(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+
+  void _forgetActivityOrders(Set<String> keys) {
+    if (keys.isEmpty) return;
+    _activityOrders.removeWhere((order) => _hasAnyActivityKey(order, keys));
+    _countedActivityOrderIds
+      ..clear()
+      ..addAll(_activityOrders.map(_activityIdFor));
+  }
+
+  void _forgetActivityOrdersByFingerprint(Set<String> fingerprints) {
+    if (fingerprints.isEmpty) return;
+    _activityOrders.removeWhere(
+      (order) => _hasAnyActivityFingerprint(order, fingerprints),
+    );
+    _countedActivityOrderIds
+      ..clear()
+      ..addAll(_activityOrders.map(_activityIdFor));
   }
 
   void _rememberActivityOrder(RiderOrder order) {
-    final activityId = order.id.trim().isEmpty
-        ? '${order.number}-${order.createdAt.toIso8601String()}'
-        : order.id;
+    final activityId = _activityIdFor(order);
     if (!_countedActivityOrderIds.add(activityId)) return;
     _activityOrders.insert(0, order);
-    _activityStats = _activityStats.addOrder(order);
+    _persistLocalActivityOrders();
+  }
+
+  List<RiderOrder> _mergeActivityOrders(
+    Iterable<RiderOrder> primary,
+    Iterable<RiderOrder> fallback,
+  ) {
+    final seen = <String>{};
+    final merged = <RiderOrder>[];
+    for (final order in [...primary, ...fallback]) {
+      final activityId = _activityIdFor(order);
+      if (seen.add(activityId)) merged.add(order);
+    }
+    return merged;
+  }
+
+  String _activityIdFor(RiderOrder order) => order.id.trim().isEmpty
+      ? '${order.number}-${order.createdAt.toIso8601String()}'
+      : order.id;
+
+  String get _activityStorageKey =>
+      '${_activityStoragePrefix}_${widget.driver.id}';
+
+  Future<void> _loadLocalActivityOrders() async {
+    final values = await _storageChannel.invokeListMethod<String>(
+          'getStringList',
+          {'key': _activityStorageKey},
+        ) ??
+        const <String>[];
+    final orders = <RiderOrder>[];
+    for (final value in values) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is Map<String, dynamic>) {
+          final order = RiderOrder.fromActivityJson(decoded);
+          if (order.countsTowardActivity) orders.add(order);
+        }
+      } catch (_) {}
+    }
+    _activityOrders
+      ..clear()
+      ..addAll(orders);
+    _countedActivityOrderIds
+      ..clear()
+      ..addAll(_activityOrders.map(_activityIdFor));
+    if (mounted) {
+      setState(
+        () => _activityStats = RiderActivityStats.fromDeliveredOrders(
+          _activityOrders,
+        ),
+      );
+    }
+  }
+
+  Future<void> _persistLocalActivityOrders() async {
+    final values = _activityOrders
+        .where((order) => order.countsTowardActivity)
+        .take(100)
+        .map((order) => jsonEncode(order.toActivityJson()))
+        .toList();
+    _activityPersistence = _activityPersistence.then((_) async {
+      await _storageChannel.invokeMethod<void>(
+        'setStringList',
+        {
+          'key': _activityStorageKey,
+          'values': values,
+        },
+      );
+    });
+    await _activityPersistence;
   }
 
   @override
@@ -820,17 +1230,30 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
               onOnlineChanged: _setOnline,
               onSelectOrder: (order) => setState(() => _selectedOrder = order),
               onDelivered: (order) => _updateStatus(order, 'completed'),
+              onAvailableForNextOrders: () => _setAvailableForNextOrders(),
+              lastDeliveredOrder: _lastDeliveredOrder,
             ),
             _ActivityTab(
               stats: _activityStats,
               orders: _activityOrders,
+              activeOrders: _orders,
               onRefresh: _loadOrders,
             ),
             _SettingsTab(
               online: _online,
+              backgroundTrackingEnabled: _backgroundTrackingEnabled,
+              posCheckedIn: _posCheckedIn,
+              posCheckUpdating: _posCheckUpdating,
+              trackerStatus: _trackerStatus,
+              trackerChannel: _locationPusher.restaurantChannelName,
               driver: widget.driver,
               onOnlineChanged: _setOnline,
-              onLogout: widget.onLogout,
+              onBackgroundTrackingChanged: _setBackgroundTrackingEnabled,
+              onPosCheckedInChanged: _setPosCheckedIn,
+              onLogout: () {
+                unawaited(_stopBackgroundTrackingService());
+                widget.onLogout();
+              },
             ),
           ],
         ),
@@ -867,12 +1290,112 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
         value ? 'available' : 'offline',
       );
       widget.onDriverChanged(updated);
-      if (value) _loadOrders();
+      if (value) {
+        _startLocationBroadcasting();
+        unawaited(_ensureDefaultPosCheckIn());
+        unawaited(_startBackgroundTrackingService());
+        _loadOrders();
+      } else {
+        _locationTimer?.cancel();
+        unawaited(_stopBackgroundTrackingService());
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _online = !value);
+      _startLocationBroadcasting();
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  Future<void> _setAvailableForNextOrders([RiderOrder? order]) async {
+    if (_updating) return;
+    final completedOrder = order ?? _lastDeliveredOrder;
+    setState(() => _updating = true);
+    try {
+      if (completedOrder != null &&
+          completedOrder.assignmentId.trim().isNotEmpty) {
+        await widget.apiClient.completeDriverAssignment(
+          completedOrder.assignmentId,
+          driver: widget.driver,
+        );
+      }
+      await _setOnline(true);
+      await _setPosCheckedIn(true);
+      if (!mounted) return;
+      setState(() => _lastDeliveredOrder = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You are available for next orders.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.toString())));
+    } finally {
+      if (mounted) setState(() => _updating = false);
+    }
+  }
+
+  void _setBackgroundTrackingEnabled(bool value) {
+    setState(() {
+      _backgroundTrackingEnabled = value;
+      _trackerStatus =
+          value ? 'Background tracker enabled' : 'Background tracker disabled';
+    });
+    if (value) {
+      unawaited(_startBackgroundTrackingService());
+    } else {
+      unawaited(_stopBackgroundTrackingService());
+    }
+  }
+
+  Future<void> _setPosCheckedIn(bool value) async {
+    if (_posCheckUpdating) return;
+    setState(() => _posCheckUpdating = true);
+    try {
+      if (value) {
+        await widget.apiClient.checkInDriverAtPos(
+          widget.driver,
+          branchId: widget.branch?.id ?? widget.driver.restaurantId,
+        );
+      } else {
+        await widget.apiClient.checkOutDriverAtPos(
+          widget.driver,
+          branchId: widget.branch?.id ?? widget.driver.restaurantId,
+        );
+      }
+      if (!mounted) return;
+      setState(() => _posCheckedIn = value);
+      unawaited(_sendLocationUpdate());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            value
+                ? 'POS check-in enabled. Refresh POS drivers if needed.'
+                : 'POS check-in disabled.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.toString())));
+    } finally {
+      if (mounted) setState(() => _posCheckUpdating = false);
+    }
+  }
+
+  Future<void> _ensureDefaultPosCheckIn() async {
+    if (!_online || !_posCheckedIn || _posCheckUpdating) return;
+    try {
+      await widget.apiClient.checkInDriverAtPos(
+        widget.driver,
+        branchId: widget.branch?.id ?? widget.driver.restaurantId,
+      );
+      if (!mounted) return;
+      setState(() => _posCheckedIn = true);
+    } catch (_) {
+      // Keep the switch on by default; the rider can retry by toggling it.
     }
   }
 }
@@ -890,6 +1413,8 @@ class _DeliveryTab extends StatelessWidget {
     required this.onOnlineChanged,
     required this.onSelectOrder,
     required this.onDelivered,
+    required this.onAvailableForNextOrders,
+    required this.lastDeliveredOrder,
   });
 
   final RiderDriver driver;
@@ -903,10 +1428,18 @@ class _DeliveryTab extends StatelessWidget {
   final ValueChanged<bool> onOnlineChanged;
   final ValueChanged<RiderOrder> onSelectOrder;
   final ValueChanged<RiderOrder> onDelivered;
+  final Future<void> Function() onAvailableForNextOrders;
+  final RiderOrder? lastDeliveredOrder;
 
   @override
   Widget build(BuildContext context) {
-    final selected = selectedOrder;
+    final activeOrders =
+        orders.where((order) => order.shouldShowInDelivery).toList();
+    final selected = selectedOrder?.shouldShowInDelivery == true
+        ? selectedOrder
+        : activeOrders.isEmpty
+            ? null
+            : activeOrders.first;
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView(
@@ -915,7 +1448,7 @@ class _DeliveryTab extends StatelessWidget {
           _RiderHeader(
             driver: driver,
             online: online,
-            orderCount: orders.length,
+            orderCount: activeOrders.length,
             onOnlineChanged: onOnlineChanged,
             onRefresh: onRefresh,
           ),
@@ -936,15 +1469,30 @@ class _DeliveryTab extends StatelessWidget {
               padding: EdgeInsets.only(top: 80),
               child: Center(child: CircularProgressIndicator()),
             )
-          else if (orders.isEmpty)
-            const _EmptyDeliveries()
-          else ...[
+          else if (activeOrders.isEmpty) ...[
+            if (lastDeliveredOrder != null) ...[
+              ActiveDeliveryPanel(
+                order: lastDeliveredOrder!,
+                updating: updating,
+                onDelivered: () {},
+                onBeAvailable: onAvailableForNextOrders,
+              ),
+            ] else ...[
+              const _EmptyDeliveries(),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: onAvailableForNextOrders,
+                icon: const Icon(Icons.person_pin_circle_outlined),
+                label: const Text('Available for next orders'),
+              ),
+            ],
+          ] else ...[
             Text(
               'Assigned orders',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 10),
-            ...orders.map(
+            ...activeOrders.map(
               (order) => RiderOrderCard(
                 order: order,
                 selected: selected?.id == order.id,
@@ -957,6 +1505,7 @@ class _DeliveryTab extends StatelessWidget {
                 order: selected,
                 updating: updating,
                 onDelivered: () => onDelivered(selected),
+                onBeAvailable: onAvailableForNextOrders,
               ),
           ],
         ],
@@ -969,17 +1518,47 @@ class _ActivityTab extends StatelessWidget {
   const _ActivityTab({
     required this.stats,
     required this.orders,
+    required this.activeOrders,
     required this.onRefresh,
   });
 
   final RiderActivityStats stats;
   final List<RiderOrder> orders;
+  final List<RiderOrder> activeOrders;
   final Future<void> Function() onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    final countedOrders =
-        orders.where((order) => order.countsTowardActivity).toList();
+    final activeKeys = {
+      for (final order in activeOrders) ...[
+        if (order.id.trim().isNotEmpty) 'id:${order.id.trim()}',
+        if (order.assignmentId.trim().isNotEmpty)
+          'assignment:${order.assignmentId.trim()}',
+        if (order.number.trim().isNotEmpty) 'number:${order.number.trim()}',
+      ],
+    };
+    final activeFingerprints = {
+      for (final order in activeOrders) ..._activityFingerprints(order),
+    };
+    bool isActiveOrder(RiderOrder order) {
+      final keys = {
+        if (order.id.trim().isNotEmpty) 'id:${order.id.trim()}',
+        if (order.assignmentId.trim().isNotEmpty)
+          'assignment:${order.assignmentId.trim()}',
+        if (order.number.trim().isNotEmpty) 'number:${order.number.trim()}',
+      };
+      final fingerprints = _activityFingerprints(order);
+      return keys.any(activeKeys.contains) ||
+          fingerprints.any(activeFingerprints.contains);
+    }
+
+    final countedOrders = orders
+        .where(
+          (order) => order.countsTowardActivity && !isActiveOrder(order),
+        )
+        .toList();
+    final visibleStats =
+        RiderActivityStats.fromDeliveredOrders(countedOrders).mergedWith(stats);
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView(
@@ -990,19 +1569,19 @@ class _ActivityTab extends StatelessWidget {
           _ActivityCard(
             icon: Icons.timer_outlined,
             label: 'Average delivery time',
-            value: stats.averageDeliveryTimeLabel,
+            value: visibleStats.averageDeliveryTimeLabel,
           ),
           const SizedBox(height: 14),
           _ActivityCard(
             icon: Icons.delivery_dining,
             label: 'Deliveries today',
-            value: '${stats.deliveriesToday}',
+            value: '${visibleStats.deliveriesToday}',
           ),
           const SizedBox(height: 14),
           _ActivityCard(
             icon: Icons.payments,
             label: 'Total value',
-            value: stats.totalValueLabel,
+            value: visibleStats.totalValueLabel,
           ),
           if (countedOrders.isNotEmpty) ...[
             const SizedBox(height: 14),
@@ -1027,7 +1606,7 @@ class _ActivityTab extends StatelessWidget {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    'Order #${order.number} - ${order.statusLabel}',
+                                    'Order #${order.number} - ${order.activityStatusLabel}',
                                     style: const TextStyle(
                                         fontWeight: FontWeight.w800),
                                   ),
@@ -1060,19 +1639,48 @@ class _ActivityTab extends StatelessWidget {
       ),
     );
   }
+
+  static Set<String> _activityFingerprints(RiderOrder order) {
+    final number = _normalizeActivityText(order.number);
+    final customer = _normalizeActivityText(order.customerName);
+    final total = (order.total * 100).round();
+    return {
+      if (number.isNotEmpty) 'number:$number',
+      if (number.isNotEmpty && total > 0) 'number-total:$number:$total',
+      if (number.isNotEmpty && customer.isNotEmpty)
+        'number-customer:$number:$customer',
+    };
+  }
+
+  static String _normalizeActivityText(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
 }
 
 class _SettingsTab extends StatelessWidget {
   const _SettingsTab({
     required this.online,
+    required this.backgroundTrackingEnabled,
+    required this.posCheckedIn,
+    required this.posCheckUpdating,
+    required this.trackerStatus,
+    required this.trackerChannel,
     required this.driver,
     required this.onOnlineChanged,
+    required this.onBackgroundTrackingChanged,
+    required this.onPosCheckedInChanged,
     required this.onLogout,
   });
 
   final bool online;
+  final bool backgroundTrackingEnabled;
+  final bool posCheckedIn;
+  final bool posCheckUpdating;
+  final String trackerStatus;
+  final String trackerChannel;
   final RiderDriver driver;
   final ValueChanged<bool> onOnlineChanged;
+  final ValueChanged<bool> onBackgroundTrackingChanged;
+  final ValueChanged<bool> onPosCheckedInChanged;
   final VoidCallback onLogout;
 
   @override
@@ -1105,6 +1713,33 @@ class _SettingsTab extends StatelessWidget {
             onChanged: onOnlineChanged,
             title: const Text('Online with RMS'),
             secondary: const Icon(Icons.radio_button_checked),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: backgroundTrackingEnabled,
+            onChanged: onBackgroundTrackingChanged,
+            title: const Text('Run in background'),
+            subtitle: const Text('Keep tracking active after leaving the app.'),
+            secondary: const Icon(Icons.sync_lock_outlined),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: posCheckedIn,
+            onChanged: posCheckUpdating ? null : onPosCheckedInChanged,
+            title: const Text('POS check-in'),
+            subtitle: const Text('Enable this so POS can show your map icon.'),
+            secondary: posCheckUpdating
+                ? const SizedBox.square(
+                    dimension: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.fact_check_outlined),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.location_searching),
+            title: const Text('Tracker status'),
+            subtitle: Text('$trackerStatus\n$trackerChannel'),
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
@@ -1157,18 +1792,526 @@ class _ActivityCard extends StatelessWidget {
       );
 }
 
+class RiderPusherLocationClient {
+  RiderPusherLocationClient({
+    required this.baseUrl,
+    required this.driver,
+    http.Client? httpClient,
+  }) : _httpClient = httpClient ?? createRmsHttpClient();
+
+  static const _apiKey = String.fromEnvironment(
+    'PUSHER_KEY',
+    defaultValue: '4ad8906fa64132edd1c8',
+  );
+  static const _cluster = String.fromEnvironment(
+    'PUSHER_CLUSTER',
+    defaultValue: 'ap2',
+  );
+  static const _fallbackClusters = <String>[
+    _cluster,
+    'mt1',
+    'ap1',
+    'ap3',
+    'ap4',
+    'eu',
+    'us2',
+    'sa1',
+  ];
+
+  final String baseUrl;
+  final RiderDriver driver;
+  final http.Client _httpClient;
+  WebSocket? _socket;
+  Future<void>? _connecting;
+  final Set<String> _activeOrderIds = <String>{};
+  final Set<String> _subscribedChannels = <String>{};
+  double? _lastLatitude;
+  double? _lastLongitude;
+  int? _lastTimestamp;
+
+  String get restaurantChannelName => _channelName;
+  String get _channelName => 'private-restaurant-${driver.restaurantId}';
+  Set<String> get _channelNames => {
+        _channelName,
+        ..._activeOrderIds.map((id) => 'private-order-$id'),
+      };
+
+  void updateActiveOrderIds(Iterable<String> orderIds) {
+    final next =
+        orderIds.map((id) => id.trim()).where((id) => id.isNotEmpty).toSet();
+    if (_activeOrderIds.length == next.length &&
+        _activeOrderIds.containsAll(next)) {
+      return;
+    }
+    _activeOrderIds
+      ..clear()
+      ..addAll(next);
+    _resetConnection();
+  }
+
+  Future<void> publishLocation({
+    required double latitude,
+    required double longitude,
+    required String phase,
+    required Set<String> activeOrderIds,
+  }) async {
+    if (driver.restaurantId.trim().isEmpty) return;
+    if (driver.id.trim().isEmpty) return;
+    updateActiveOrderIds(activeOrderIds);
+    await _ensureConnected();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final movement = _calculateMovement(latitude, longitude, now);
+    final sanitizedActiveOrderIds = _activeOrderIds.toList(growable: false);
+    _sendLocationPayload({
+      'driverId': driver.id,
+      'lat': latitude,
+      'lng': longitude,
+      'bearing': movement.bearing,
+      'speed': movement.speed,
+      'phase': phase,
+      'status': phase == 'available' ? 'available' : 'on-delivery',
+      'activeOrderIds': sanitizedActiveOrderIds,
+      'activeOrders': sanitizedActiveOrderIds,
+      'activeOrderCount': sanitizedActiveOrderIds.length,
+      'orderCount': sanitizedActiveOrderIds.length,
+      'timestamp': now,
+    });
+    _sendDriverStatePayload({
+      'driverId': driver.id,
+      'status': sanitizedActiveOrderIds.isEmpty ? 'available' : 'on-delivery',
+      'activeOrderIds': sanitizedActiveOrderIds,
+      'activeOrders': sanitizedActiveOrderIds,
+      'activeOrderCount': sanitizedActiveOrderIds.length,
+      'orderCount': sanitizedActiveOrderIds.length,
+      'phase': phase,
+      'timestamp': now,
+    });
+    _lastLatitude = latitude;
+    _lastLongitude = longitude;
+    _lastTimestamp = now;
+  }
+
+  void _sendLocationPayload(Map<String, dynamic> payload) {
+    for (final channelName in _channelNames) {
+      if (!_subscribedChannels.contains(channelName)) continue;
+      _send({
+        'event': 'client-driver-location',
+        'channel': channelName,
+        'data': jsonEncode(payload),
+      });
+    }
+  }
+
+  void _sendDriverStatePayload(Map<String, dynamic> payload) {
+    if (!_subscribedChannels.contains(_channelName)) return;
+    _send({
+      'event': 'client-driver-status-change',
+      'channel': _channelName,
+      'data': jsonEncode(payload),
+    });
+  }
+
+  Future<void> _ensureConnected() async {
+    final channels = _channelNames;
+    if (_socket?.readyState == WebSocket.open &&
+        _subscribedChannels.containsAll(channels)) {
+      return;
+    }
+    _connecting ??= _connect();
+    try {
+      await _connecting;
+    } finally {
+      _connecting = null;
+    }
+  }
+
+  Future<void> _connect() async {
+    Exception? lastError;
+    for (final cluster in _fallbackClusters.toSet()) {
+      try {
+        await _connectToCluster(cluster);
+        return;
+      } on Exception catch (error) {
+        lastError = error;
+        if (!_isWrongClusterError(error)) rethrow;
+      }
+    }
+    throw lastError ?? Exception('Pusher connection failed.');
+  }
+
+  Future<void> _connectToCluster(String cluster) async {
+    await _resetConnection();
+    final socket = await WebSocket.connect(
+      'wss://ws-$cluster.pusher.com/app/$_apiKey'
+      '?protocol=7&client=js&version=8.4.0&flash=false',
+    ).timeout(const Duration(seconds: 10));
+    _socket = socket;
+
+    final socketIdCompleter = Completer<String>();
+    final subscriptionCompleters = {
+      for (final channelName in _channelNames) channelName: Completer<void>(),
+    };
+    socket.listen(
+      (message) => _handleMessage(
+        message,
+        socketIdCompleter: socketIdCompleter,
+        subscriptionCompleters: subscriptionCompleters,
+      ),
+      onError: (_) => _resetConnection(),
+      onDone: _resetConnection,
+      cancelOnError: false,
+    );
+
+    final socketId = await socketIdCompleter.future.timeout(
+      const Duration(seconds: 10),
+    );
+    await _subscribeChannel(
+      socketId: socketId,
+      channelName: _channelName,
+      completer: subscriptionCompleters[_channelName],
+    );
+    for (final channelName in subscriptionCompleters.keys) {
+      if (channelName == _channelName) continue;
+      try {
+        await _subscribeChannel(
+          socketId: socketId,
+          channelName: channelName,
+          completer: subscriptionCompleters[channelName],
+        );
+      } catch (_) {
+        // Order tracking channels are useful for customer maps, but restaurant
+        // tracking must continue even if one order channel cannot auth.
+      }
+    }
+  }
+
+  bool _isWrongClusterError(Exception error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('code: 4001') ||
+        message.contains('not in this cluster');
+  }
+
+  Future<void> _subscribeChannel({
+    required String socketId,
+    required String channelName,
+    required Completer<void>? completer,
+  }) async {
+    if (completer == null) return;
+    final auth = await _authorize(socketId, channelName);
+    final data = <String, dynamic>{
+      'channel': channelName,
+      'auth': auth['auth'],
+      if (auth['channel_data'] != null) 'channel_data': auth['channel_data'],
+    };
+    _send({
+      'event': 'pusher:subscribe',
+      'data': data,
+    });
+    await completer.future.timeout(const Duration(seconds: 10));
+  }
+
+  Future<Map<String, dynamic>> _authorize(
+    String socketId,
+    String channelName,
+  ) async {
+    final body = {
+      'socket_id': socketId,
+      'channel_name': channelName,
+    };
+    http.Response? lastResponse;
+    for (final path in const ['/api/delivery/auth', '/api/pusher/auth']) {
+      final response = await _httpClient
+          .post(
+            Uri.parse('$baseUrl$path'),
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              if (driver.token.trim().isNotEmpty)
+                'Authorization': 'Bearer ${driver.token.trim()}',
+              if (driver.restaurantId.trim().isNotEmpty)
+                'X-Branch-Id': driver.restaurantId.trim(),
+            },
+            body: body,
+          )
+          .timeout(const Duration(seconds: 10));
+      lastResponse = response;
+      if (response.statusCode == 404 || response.statusCode == 405) continue;
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        break;
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        final data = decoded['data'];
+        if (decoded['auth'] is String) return decoded;
+        if (data is Map<String, dynamic> && data['auth'] is String) {
+          return data;
+        }
+      }
+    }
+    if (lastResponse != null &&
+        (lastResponse.statusCode < 200 || lastResponse.statusCode >= 300)) {
+      throw Exception('Pusher auth failed with ${lastResponse.statusCode}.');
+    }
+    throw Exception('Pusher auth response was invalid.');
+  }
+
+  Future<void> _handleMessage(
+    dynamic message, {
+    required Completer<String> socketIdCompleter,
+    required Map<String, Completer<void>> subscriptionCompleters,
+  }) async {
+    if (message is! String) return;
+    final decoded = jsonDecode(message);
+    if (decoded is! Map<String, dynamic>) return;
+    final event = decoded['event'];
+    if (event == 'pusher:connection_established') {
+      final data = _decodePusherData(decoded['data']);
+      final socketId = data['socket_id'];
+      if (socketId is String && !socketIdCompleter.isCompleted) {
+        socketIdCompleter.complete(socketId);
+      }
+    } else if (event == 'pusher:ping') {
+      _send({'event': 'pusher:pong', 'data': {}});
+    } else if (event == 'pusher_internal:subscription_succeeded' &&
+        decoded['channel'] is String) {
+      final channelName = decoded['channel'] as String;
+      _subscribedChannels.add(channelName);
+      final completer = subscriptionCompleters[channelName];
+      if (completer != null && !completer.isCompleted) completer.complete();
+    } else if (event == 'pusher:error') {
+      final details = _decodePusherData(decoded['data']);
+      final message =
+          details.isEmpty ? '${decoded['data'] ?? decoded}' : '$details';
+      if (!socketIdCompleter.isCompleted) {
+        socketIdCompleter
+            .completeError(Exception('Pusher connection failed: $message'));
+      }
+      for (final completer in subscriptionCompleters.values) {
+        if (!completer.isCompleted) {
+          completer
+              .completeError(Exception('Pusher subscribe failed: $message'));
+        }
+      }
+    }
+  }
+
+  Map<String, dynamic> _decodePusherData(dynamic data) {
+    if (data is Map<String, dynamic>) return data;
+    if (data is String) {
+      try {
+        final decoded = jsonDecode(data);
+        if (decoded is Map<String, dynamic>) return decoded;
+      } catch (_) {}
+    }
+    return const {};
+  }
+
+  _RiderMovement _calculateMovement(
+    double latitude,
+    double longitude,
+    int timestamp,
+  ) {
+    final previousLatitude = _lastLatitude;
+    final previousLongitude = _lastLongitude;
+    final previousTimestamp = _lastTimestamp;
+    if (previousLatitude == null ||
+        previousLongitude == null ||
+        previousTimestamp == null) {
+      return const _RiderMovement(bearing: 0, speed: 0);
+    }
+    final elapsedSeconds = (timestamp - previousTimestamp) / 1000;
+    if (elapsedSeconds <= 0) return const _RiderMovement(bearing: 0, speed: 0);
+    final distance = _distanceMeters(
+      previousLatitude,
+      previousLongitude,
+      latitude,
+      longitude,
+    );
+    return _RiderMovement(
+      bearing: _bearingDegrees(
+        previousLatitude,
+        previousLongitude,
+        latitude,
+        longitude,
+      ),
+      speed: (distance / elapsedSeconds) * 3.6,
+    );
+  }
+
+  double _distanceMeters(
+    double fromLatitude,
+    double fromLongitude,
+    double toLatitude,
+    double toLongitude,
+  ) {
+    const earthRadiusMeters = 6371000;
+    final dLat = _degreesToRadians(toLatitude - fromLatitude);
+    final dLng = _degreesToRadians(toLongitude - fromLongitude);
+    final lat1 = _degreesToRadians(fromLatitude);
+    final lat2 = _degreesToRadians(toLatitude);
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1) *
+            math.cos(lat2) *
+            math.sin(dLng / 2) *
+            math.sin(dLng / 2);
+    return earthRadiusMeters * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  }
+
+  double _bearingDegrees(
+    double fromLatitude,
+    double fromLongitude,
+    double toLatitude,
+    double toLongitude,
+  ) {
+    final lat1 = _degreesToRadians(fromLatitude);
+    final lat2 = _degreesToRadians(toLatitude);
+    final dLng = _degreesToRadians(toLongitude - fromLongitude);
+    final y = math.sin(dLng) * math.cos(lat2);
+    final x = math.cos(lat1) * math.sin(lat2) -
+        math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
+    return (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+  }
+
+  double _degreesToRadians(double degrees) => degrees * math.pi / 180;
+
+  void _send(Map<String, dynamic> event) {
+    final socket = _socket;
+    if (socket == null || socket.readyState != WebSocket.open) {
+      throw Exception('Pusher is not connected.');
+    }
+    socket.add(jsonEncode(event));
+  }
+
+  Future<void> _resetConnection() async {
+    _subscribedChannels.clear();
+    final socket = _socket;
+    _socket = null;
+    await socket?.close();
+  }
+
+  Future<void> dispose() async {
+    await _resetConnection();
+  }
+}
+
+class RiderBackgroundTracker {
+  RiderBackgroundTracker({
+    MethodChannel? channel,
+    http.Client? httpClient,
+  })  : _channel = channel ??
+            const MethodChannel('com.example.pizza_hut/background_tracking'),
+        _httpClient = httpClient ?? createRmsHttpClient();
+
+  final MethodChannel _channel;
+  final http.Client _httpClient;
+  RiderPusherLocationClient? _pusher;
+
+  Future<void> run() async {
+    while (true) {
+      try {
+        await _tick();
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(seconds: 6));
+    }
+  }
+
+  Future<void> _tick() async {
+    final session = await _loadSession();
+    if (session == null) {
+      await _pusher?.dispose();
+      _pusher = null;
+      return;
+    }
+    final apiClient = RiderApiClient(
+      httpClient: _httpClient,
+      baseUrl: session.baseUrl,
+    );
+    final orders = await apiClient.fetchDriverAssignments(session.driver);
+    final activeOrders =
+        orders.where((order) => order.shouldShowInDelivery).toList();
+    final activeOrderIds = activeOrders
+        .map((order) => order.id)
+        .where((id) => id.trim().isNotEmpty)
+        .toSet();
+    final location = await _requestLocation();
+    final pusher = _pusher ??= RiderPusherLocationClient(
+      baseUrl: apiClient.baseUrl,
+      driver: session.driver,
+    );
+    pusher.updateActiveOrderIds(activeOrderIds);
+    await pusher.publishLocation(
+      latitude: location.latitude,
+      longitude: location.longitude,
+      phase: activeOrderIds.isEmpty ? 'available' : 'en-route',
+      activeOrderIds: activeOrderIds,
+    );
+    await apiClient.tryUpdateDriverLocation(
+      session.driver,
+      latitude: location.latitude,
+      longitude: location.longitude,
+    );
+  }
+
+  Future<_RiderBackgroundSession?> _loadSession() async {
+    final config = await _channel.invokeMapMethod<String, dynamic>('getConfig');
+    final baseUrl = '${config?['baseUrl'] ?? ''}'.trim();
+    final driverJson = config?['driver'];
+    if (baseUrl.isEmpty || driverJson is! Map) return null;
+    final driver = RiderDriver.fromJson(
+      Map<String, dynamic>.from(driverJson),
+    );
+    if (driver.id.trim().isEmpty || driver.token.trim().isEmpty) return null;
+    return _RiderBackgroundSession(baseUrl: baseUrl, driver: driver);
+  }
+
+  Future<RiderLocationFix> _requestLocation() async {
+    final result = await _channel.invokeMapMethod<String, dynamic>(
+      'getCurrentLocation',
+    );
+    final latitude = result?['latitude'];
+    final longitude = result?['longitude'];
+    if (latitude is num && longitude is num) {
+      return RiderLocationFix(
+        latitude: latitude.toDouble(),
+        longitude: longitude.toDouble(),
+      );
+    }
+    throw Exception('Could not read rider location.');
+  }
+}
+
+class _RiderBackgroundSession {
+  const _RiderBackgroundSession({
+    required this.baseUrl,
+    required this.driver,
+  });
+
+  final String baseUrl;
+  final RiderDriver driver;
+}
+
+class _RiderMovement {
+  const _RiderMovement({required this.bearing, required this.speed});
+
+  final double bearing;
+  final double speed;
+}
+
 class RiderApiClient {
   RiderApiClient({http.Client? httpClient, String? baseUrl})
       : _httpClient = httpClient ?? createRmsHttpClient(),
-        baseUrl = baseUrl ??
-            const String.fromEnvironment('RMS_API_BASE_URL',
-                defaultValue: 'https://rms-backend-v1.vercel.app');
+        baseUrl = _normalizeBaseUrl(
+          baseUrl ??
+              const String.fromEnvironment(
+                'RMS_API_BASE_URL',
+                defaultValue: 'https://rms-backend-v1.vercel.app',
+              ),
+        );
 
   final http.Client _httpClient;
   final String baseUrl;
 
   RiderApiClient withBaseUrl(String nextBaseUrl) {
-    final normalized = nextBaseUrl.trim();
+    final normalized = _normalizeBaseUrl(nextBaseUrl);
     if (normalized.isEmpty || normalized == baseUrl) return this;
     return RiderApiClient(httpClient: _httpClient, baseUrl: normalized);
   }
@@ -1246,7 +2389,9 @@ class RiderApiClient {
     if (data is! Map<String, dynamic>) {
       throw Exception('RMS did not return driver profile.');
     }
-    return RiderDriver.fromJson(data).withToken(driver.token);
+    return RiderDriver.fromJson(data)
+        .withToken(driver.token)
+        .withRestaurantId(driver.restaurantId);
   }
 
   Future<void> updateDriverLocation(
@@ -1289,6 +2434,129 @@ class RiderApiClient {
     }
   }
 
+  Future<void> checkInDriverAtPos(
+    RiderDriver driver, {
+    required String branchId,
+  }) async {
+    final employeeId = await _resolveDriverEmployeeId(driver, branchId);
+    await _postAttendanceAction(
+      driver,
+      branchId: branchId,
+      employeeId: employeeId,
+      action: 'check-in',
+    );
+  }
+
+  Future<void> checkOutDriverAtPos(
+    RiderDriver driver, {
+    required String branchId,
+  }) async {
+    final employeeId = await _resolveDriverEmployeeId(driver, branchId);
+    await _postAttendanceAction(
+      driver,
+      branchId: branchId,
+      employeeId: employeeId,
+      action: 'check-out',
+    );
+  }
+
+  Future<void> _postAttendanceAction(
+    RiderDriver driver, {
+    required String branchId,
+    required String employeeId,
+    required String action,
+  }) async {
+    final paths = [
+      '/api/attendance/$action',
+      '/api/employee/attendance/$action',
+    ];
+    for (final path in paths) {
+      try {
+        final response = await _httpClient
+            .post(
+              _uri(path),
+              headers: _jsonHeaders(driver.token),
+              body: jsonEncode({
+                'branchId': branchId,
+                'employeeId': employeeId,
+              }),
+            )
+            .timeout(const Duration(seconds: 15));
+        _decode(response);
+        return;
+      } on RmsApiException catch (error) {
+        if (action == 'check-in' &&
+            error.message.toLowerCase().contains('already checked in')) {
+          return;
+        }
+        if (error.code == 'ROUTE_UNAVAILABLE' && path != paths.last) {
+          continue;
+        }
+        if (error.code != 'ROUTE_UNAVAILABLE') {
+          rethrow;
+        }
+      }
+    }
+    throw Exception('RMS attendance route is not available.');
+  }
+
+  Future<String> _resolveDriverEmployeeId(
+    RiderDriver driver,
+    String branchId,
+  ) async {
+    final search = driver.driverId.trim();
+    if (search.isEmpty) {
+      throw Exception('Driver employee code is missing.');
+    }
+    final response = await _getFirstAvailable([
+      _uri('/api/employees', {
+        'branchId': branchId,
+        'search': search,
+        'isActive': 'true',
+      }),
+      _uri('/api/employee/employees', {
+        'branchId': branchId,
+        'search': search,
+        'isActive': 'true',
+      }),
+    ], driver.token);
+    final body = _decode(response);
+    final data = body['data'];
+    final Iterable<Map<String, dynamic>> employees =
+        data is List ? data.whereType<Map<String, dynamic>>() : const [];
+    for (final employee in employees) {
+      if ('${employee['employeeId'] ?? ''}'.trim().toUpperCase() ==
+          search.toUpperCase()) {
+        final id = '${employee['_id'] ?? employee['id'] ?? ''}'.trim();
+        if (id.isNotEmpty) return id;
+      }
+    }
+    throw Exception('POS employee record was not found for driver $search.');
+  }
+
+  Future<http.Response> _getFirstAvailable(
+    List<Uri> uris,
+    String token,
+  ) async {
+    RmsApiException? lastRouteError;
+    for (final uri in uris) {
+      final response = await _httpClient
+          .get(uri, headers: _jsonHeaders(token))
+          .timeout(const Duration(seconds: 15));
+      try {
+        _decode(response);
+        return response;
+      } on RmsApiException catch (error) {
+        if (error.code == 'ROUTE_UNAVAILABLE') {
+          lastRouteError = error;
+          continue;
+        }
+        rethrow;
+      }
+    }
+    throw lastRouteError ?? Exception('RMS backend route is not available.');
+  }
+
   Future<List<RiderOrder>> fetchDriverAssignments(RiderDriver driver) async {
     final response = await _httpClient
         .get(
@@ -1308,6 +2576,40 @@ class RiderApiClient {
   }
 
   Future<RiderActivityReport> fetchDriverActivity(RiderDriver driver) async {
+    try {
+      final response = await _httpClient.get(
+        _uri('/api/delivery/driver-drop/summary', {
+          'branchId': driver.restaurantId,
+          'restaurantId': driver.restaurantId,
+          'driverId': driver.id,
+          'date': _todayDateString(),
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Branch-Id': driver.restaurantId,
+        },
+      ).timeout(const Duration(seconds: 15));
+      final body = _decode(response);
+      final data = body['data'];
+      if (data is Map<String, dynamic>) {
+        final orders = data['orders'] is List
+            ? (data['orders'] as List)
+                .whereType<Map<String, dynamic>>()
+                .map(RiderOrder.fromActivityJson)
+                .where((order) => order.countsTowardActivity)
+                .toList()
+            : const <RiderOrder>[];
+        if (orders.isNotEmpty) {
+          return RiderActivityReport(
+            stats: RiderActivityStats.fromDeliveredOrders(orders),
+            orders: orders,
+          );
+        }
+      }
+    } catch (_) {
+      // Older backends may not expose driver-drop summary to the APK.
+    }
+
     final response = await _httpClient
         .get(
           _uri('/api/delivery/driver/${driver.id}/activity'),
@@ -1321,6 +2623,7 @@ class RiderApiClient {
         ? (data['orders'] as List)
             .whereType<Map<String, dynamic>>()
             .map(RiderOrder.fromActivityJson)
+            .where((order) => order.countsTowardActivity)
             .toList()
         : const <RiderOrder>[];
 
@@ -1336,44 +2639,70 @@ class RiderApiClient {
     );
   }
 
-  Future<void> updateOrderStatus(
-    String orderId,
-    String status, {
+  String _todayDateString() {
+    final now = DateTime.now();
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    return '${now.year}-$month-$day';
+  }
+
+  Future<void> completeDriverAssignment(
+    String assignmentId, {
     required RiderDriver driver,
   }) async {
-    if (status != 'completed' && status != 'delivered') return;
-    final trackingResponse = await _httpClient
-        .get(
-          _uri('/api/delivery/track/$orderId'),
-        )
-        .timeout(const Duration(seconds: 15));
-    final trackingBody = _decode(trackingResponse);
-    final tracking = trackingBody['data'];
-    if (tracking is! Map<String, dynamic> || tracking['assigned'] != true) {
-      throw Exception(
-          'Assign a driver from POS delivery before marking delivered.');
-    }
-    final assignmentId = '${tracking['assignmentId'] ?? ''}';
-    if (assignmentId.isEmpty) {
+    final resolvedAssignmentId = assignmentId.trim();
+    if (resolvedAssignmentId.isEmpty) {
       throw Exception('Delivery assignment was not returned by RMS.');
     }
     final response = await _httpClient
         .patch(
-          _uri('/api/delivery/driver/deliver/$assignmentId'),
+          _uri('/api/delivery/driver/complete/$resolvedAssignmentId'),
           headers: _jsonHeaders(driver.token),
         )
         .timeout(const Duration(seconds: 15));
     _decode(response);
   }
 
+  Future<void> updateOrderStatus(
+    String orderId,
+    String status, {
+    required RiderDriver driver,
+    String? assignmentId,
+  }) async {
+    if (status != 'completed' && status != 'delivered') return;
+    final resolvedAssignmentId =
+        assignmentId == null || assignmentId.trim().isEmpty
+            ? orderId
+            : assignmentId.trim();
+    if (resolvedAssignmentId.isEmpty) {
+      throw Exception('Delivery assignment was not returned by RMS.');
+    }
+    final response = await _httpClient
+        .patch(
+          _uri('/api/delivery/driver/deliver/$resolvedAssignmentId'),
+          headers: _jsonHeaders(driver.token),
+        )
+        .timeout(const Duration(seconds: 15));
+    _decode(response);
+  }
+
+  static String _normalizeBaseUrl(String value) {
+    var text = value.trim();
+    while (text.endsWith('/')) {
+      text = text.substring(0, text.length - 1);
+    }
+    return text.endsWith('/api') ? text.substring(0, text.length - 4) : text;
+  }
+
   Map<String, dynamic> _decode(http.Response response) {
     final contentType = response.headers['content-type'] ?? '';
     if (response.body.trimLeft().startsWith('<') ||
         (contentType.isNotEmpty && !contentType.contains('json'))) {
-      throw Exception(
-        'RMS backend route is not available: '
-        '${response.request?.method ?? 'REQUEST'} ${response.request?.url ?? ''} '
-        'returned ${response.statusCode} ${contentType.isEmpty ? 'unknown content' : contentType}.',
+      throw RmsApiException(
+        code: 'ROUTE_UNAVAILABLE',
+        message: 'RMS backend route is not available: '
+            '${response.request?.method ?? 'REQUEST'} ${response.request?.url ?? ''} '
+            'returned ${response.statusCode} ${contentType.isEmpty ? 'unknown content' : contentType}.',
       );
     }
     final decoded =
@@ -1383,10 +2712,26 @@ class RiderApiClient {
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
         body['success'] == false) {
-      throw Exception('${body['message'] ?? 'RMS request failed'}');
+      throw RmsApiException(
+        code: '${body['code'] ?? response.statusCode}',
+        message: '${body['message'] ?? 'RMS request failed'}',
+      );
     }
     return body;
   }
+}
+
+class RmsApiException implements Exception {
+  const RmsApiException({
+    required this.code,
+    required this.message,
+  });
+
+  final String code;
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 class RiderBranch {
@@ -1617,10 +2962,32 @@ class RiderDriver {
       phone: '${json['phone'] ?? ''}',
       color: '${json['color'] ?? '#3B82F6'}',
       status: '${json['status'] ?? 'offline'}',
-      restaurantId: '${json['restaurantId'] ?? 'default'}',
+      restaurantId:
+          '${json['restaurantId'] ?? json['branchId'] ?? json['branch'] ?? ''}',
       token: '${json['token'] ?? ''}',
       vehicleLabel: vehicleLabel,
     );
+  }
+
+  RiderDriver withRestaurantId(String restaurantId) => RiderDriver(
+        id: id,
+        driverId: driverId,
+        name: name,
+        phone: phone,
+        color: color,
+        status: status,
+        restaurantId: effectiveRestaurantId(restaurantId),
+        token: token,
+        vehicleLabel: vehicleLabel,
+      );
+
+  String effectiveRestaurantId(String fallbackRestaurantId) {
+    final current = restaurantId.trim();
+    if (current.isNotEmpty && current.toLowerCase() != 'default') {
+      return current;
+    }
+    final fallback = fallbackRestaurantId.trim();
+    return fallback.isEmpty ? current : fallback;
   }
 
   RiderDriver withToken(String token) => RiderDriver(
@@ -1634,6 +3001,20 @@ class RiderDriver {
         token: token,
         vehicleLabel: vehicleLabel,
       );
+
+  Map<String, dynamic> toJson() => {
+        '_id': id,
+        'id': id,
+        'driverId': driverId,
+        'name': name,
+        'phone': phone,
+        'color': color,
+        'status': status,
+        'restaurantId': restaurantId,
+        'token': token,
+        if (vehicleLabel.trim().isNotEmpty)
+          'assignedVehicle': {'label': vehicleLabel},
+      };
 
   final String id;
   final String driverId;
@@ -1730,6 +3111,10 @@ class RiderActivityStats {
   static Duration averageDeliveryTimeFor(List<RiderOrder> orders) {
     final deliveryTimes = orders
         .map((order) {
+          final backendDuration = order.deliveryDuration;
+          if (backendDuration != null && backendDuration > Duration.zero) {
+            return backendDuration;
+          }
           final finishedAt = order.deliveredAt ?? DateTime.now();
           if (!finishedAt.isAfter(order.createdAt)) return Duration.zero;
           return finishedAt.difference(order.createdAt);
@@ -1747,6 +3132,10 @@ class RiderActivityStats {
 
   static String deliveryTimeLabelFor(RiderOrder order) {
     final finishedAt = order.deliveredAt ?? DateTime.now();
+    final backendDuration = order.deliveryDuration;
+    if (backendDuration != null && backendDuration > Duration.zero) {
+      return _durationLabel(backendDuration);
+    }
     if (!finishedAt.isAfter(order.createdAt)) return '--';
     return _durationLabel(finishedAt.difference(order.createdAt));
   }
@@ -1777,6 +3166,7 @@ class RiderActivityStats {
 
 class RiderOrder {
   const RiderOrder({
+    required this.assignmentId,
     required this.id,
     required this.number,
     required this.status,
@@ -1789,6 +3179,7 @@ class RiderOrder {
     required this.total,
     required this.createdAt,
     required this.deliveredAt,
+    required this.deliveryDuration,
     required this.items,
   });
 
@@ -1799,23 +3190,49 @@ class RiderOrder {
     final customerLocation = json['customerLocation'] is Map<String, dynamic>
         ? json['customerLocation'] as Map<String, dynamic>
         : <String, dynamic>{};
+    final orderCoordinates = order['coordinates'] is Map<String, dynamic>
+        ? order['coordinates'] as Map<String, dynamic>
+        : <String, dynamic>{};
     final items = order['items'];
+    final assignmentId = '${json['_id'] ?? json['assignmentId'] ?? ''}'.trim();
+    final orderId = '${order['_id'] ?? json['orderId'] ?? ''}'.trim();
+    final orderNumber =
+        '${order['orderNumber'] ?? json['orderNumber'] ?? ''}'.trim();
+    final latitude = _numberFrom(
+      customerLocation['lat'] ??
+          customerLocation['latitude'] ??
+          orderCoordinates['lat'] ??
+          orderCoordinates['latitude'] ??
+          order['customerLat'] ??
+          order['latitude'],
+    );
+    final longitude = _numberFrom(
+      customerLocation['lng'] ??
+          customerLocation['longitude'] ??
+          orderCoordinates['lng'] ??
+          orderCoordinates['longitude'] ??
+          order['customerLng'] ??
+          order['longitude'],
+    );
     return RiderOrder(
-      id: '${order['_id'] ?? json['orderId'] ?? ''}',
-      number: '${order['orderNumber'] ?? ''}',
+      assignmentId: assignmentId,
+      id: orderId.isNotEmpty ? orderId : assignmentId,
+      number: orderNumber.isNotEmpty ? orderNumber : orderId,
       status: '${json['status'] ?? 'assigned'}',
       orderType: 'delivery',
-      customerName: '${order['customerName'] ?? ''}',
-      phone: '${order['customerPhone'] ?? ''}',
-      address: '${order['deliveryAddress'] ?? ''}',
-      latitude: (customerLocation['lat'] as num?)?.toDouble(),
-      longitude: (customerLocation['lng'] as num?)?.toDouble(),
+      customerName: '${order['customerName'] ?? json['customerName'] ?? ''}',
+      phone: '${order['customerPhone'] ?? json['customerPhone'] ?? ''}',
+      address:
+          '${order['deliveryAddress'] ?? customerLocation['address'] ?? ''}',
+      latitude: latitude,
+      longitude: longitude,
       total: (order['total'] as num?)?.toDouble() ?? 0,
       createdAt:
           DateTime.tryParse('${json['assignedAt'] ?? ''}') ?? DateTime.now(),
       deliveredAt: DateTime.tryParse(
         '${json['deliveredAt'] ?? json['completedAt'] ?? ''}',
       ),
+      deliveryDuration: _durationFrom(json),
       items: items is List
           ? items.map(RiderOrderItem.fromDeliveryPayload).toList()
           : const <RiderOrderItem>[],
@@ -1823,26 +3240,39 @@ class RiderOrder {
   }
 
   factory RiderOrder.fromActivityJson(Map<String, dynamic> json) {
+    final orderNumber = '${json['orderNumber'] ?? ''}'.trim();
+    final ticketName = '${json['ticketName'] ?? ''}'.trim();
+    final number = orderNumber.isNotEmpty
+        ? orderNumber
+        : ticketName.split(' ').first.trim();
+    final deliveredAt = DateTime.tryParse(
+      '${json['deliveredAt'] ?? json['completedAt'] ?? ''}',
+    );
+    final deliveryDuration = _durationFrom(json);
+    final rawStatus =
+        '${json['assignmentStatus'] ?? json['status'] ?? ''}'.trim();
+    final status = rawStatus.isNotEmpty ? rawStatus : 'completed';
     return RiderOrder(
-      id: '${json['orderId'] ?? json['assignmentId'] ?? ''}',
-      number: '${json['orderNumber'] ?? ''}',
-      status: '${json['status'] ?? 'completed'}',
+      assignmentId: '${json['assignmentId'] ?? json['_id'] ?? ''}',
+      id: '${json['orderId'] ?? json['assignmentId'] ?? json['id'] ?? ''}',
+      number: number,
+      status: status,
       orderType: 'delivery',
-      customerName: '',
-      phone: '',
-      address: '',
+      customerName: '${json['customerName'] ?? ''}',
+      phone: '${json['phone'] ?? ''}',
+      address: '${json['address'] ?? ''}',
       latitude: null,
       longitude: null,
       total: (json['total'] as num?)?.toDouble() ?? 0,
       createdAt:
           DateTime.tryParse('${json['assignedAt'] ?? ''}') ?? DateTime.now(),
-      deliveredAt: DateTime.tryParse(
-        '${json['deliveredAt'] ?? json['completedAt'] ?? ''}',
-      ),
+      deliveredAt: deliveredAt,
+      deliveryDuration: deliveryDuration,
       items: const <RiderOrderItem>[],
     );
   }
 
+  final String assignmentId;
   final String id;
   final String number;
   final String status;
@@ -1855,34 +3285,140 @@ class RiderOrder {
   final double total;
   final DateTime createdAt;
   final DateTime? deliveredAt;
+  final Duration? deliveryDuration;
   final List<RiderOrderItem> items;
+
+  String get normalizedStatus =>
+      status.trim().toLowerCase().replaceAll('_', '-').replaceAll(' ', '-');
+
+  bool get isRemovedFromDelivery {
+    switch (normalizedStatus) {
+      case 'delivered':
+      case 'completed':
+      case 'returning':
+      case 'returned':
+      case 'unassigned':
+      case 'cancelled':
+      case 'canceled':
+      case 'void':
+      case 'deleted':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static double? _numberFrom(Object? value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value.trim());
+    return null;
+  }
+
+  static Duration? _durationFrom(Map<String, dynamic> json) {
+    final seconds = _numberFrom(
+      json['deliverySeconds'] ??
+          json['deliveryTimeSeconds'] ??
+          json['deliveryDurationSeconds'] ??
+          json['durationSeconds'] ??
+          json['timeTakenSeconds'],
+    );
+    if (seconds != null && seconds > 0) {
+      return Duration(seconds: seconds.round());
+    }
+    final minutes = _numberFrom(
+      json['deliveryMinutes'] ??
+          json['deliveryTimeMinutes'] ??
+          json['deliveryDurationMinutes'] ??
+          json['durationMinutes'] ??
+          json['timeTakenMinutes'],
+    );
+    if (minutes != null && minutes > 0) {
+      return Duration(seconds: (minutes * 60).round());
+    }
+    return null;
+  }
+
+  Map<String, dynamic> toActivityJson() => {
+        'assignmentId': assignmentId,
+        'orderId': id,
+        'orderNumber': number,
+        'status': status,
+        'total': total,
+        'assignedAt': createdAt.toIso8601String(),
+        if (deliveredAt != null) 'deliveredAt': deliveredAt!.toIso8601String(),
+        if (deliveryDuration != null)
+          'deliverySeconds': deliveryDuration!.inSeconds,
+      };
+
+  RiderOrder copyWith({
+    String? status,
+    DateTime? deliveredAt,
+    Duration? deliveryDuration,
+  }) =>
+      RiderOrder(
+        assignmentId: assignmentId,
+        id: id,
+        number: number,
+        status: status ?? this.status,
+        orderType: orderType,
+        customerName: customerName,
+        phone: phone,
+        address: address,
+        latitude: latitude,
+        longitude: longitude,
+        total: total,
+        createdAt: createdAt,
+        deliveredAt: deliveredAt ?? this.deliveredAt,
+        deliveryDuration: deliveryDuration ?? this.deliveryDuration,
+        items: items,
+      );
 
   List<RiderOrderItem> get visibleItems =>
       items.where((item) => item.name.isNotEmpty).toList();
 
   bool get isDelivery => orderType.toLowerCase() == 'delivery';
   bool get isReady {
-    final normalized = status.toLowerCase();
-    return normalized == 'en-route' || normalized == 'assigned';
+    return normalizedStatus == 'en-route' ||
+        normalizedStatus == 'assigned' ||
+        normalizedStatus == 'accepted' ||
+        normalizedStatus == 'picked-up' ||
+        normalizedStatus == 'out-for-delivery' ||
+        normalizedStatus == 'in-progress';
   }
 
-  bool get isDelivered => status.toLowerCase() == 'delivered';
-  bool get isCompleted => status.toLowerCase() == 'completed';
+  bool get isDelivered =>
+      normalizedStatus == 'delivered' || normalizedStatus == 'returning';
+  bool get isCompleted =>
+      normalizedStatus == 'completed' ||
+      normalizedStatus == 'complete' ||
+      normalizedStatus == 'closed';
+  bool get isUnassigned => normalizedStatus == 'unassigned';
   bool get countsTowardActivity => isDelivered || isCompleted;
+  bool get isActiveDelivery => isReady;
+  bool get shouldShowInDelivery => isReady && !isRemovedFromDelivery;
 
   String get statusLabel {
-    switch (status.toLowerCase()) {
+    switch (normalizedStatus) {
       case 'assigned':
         return 'Assigned';
       case 'en-route':
         return 'En route';
       case 'delivered':
+      case 'returning':
         return 'Returning';
       case 'completed':
         return 'Completed';
+      case 'unassigned':
+        return 'Unassigned';
       default:
         return status;
     }
+  }
+
+  String get activityStatusLabel {
+    if (isCompleted) return 'Completed';
+    if (isDelivered) return 'Delivered';
+    return statusLabel;
   }
 }
 
@@ -2087,11 +3623,13 @@ class ActiveDeliveryPanel extends StatelessWidget {
     required this.order,
     required this.updating,
     required this.onDelivered,
+    required this.onBeAvailable,
   });
 
   final RiderOrder order;
   final bool updating;
   final VoidCallback onDelivered;
+  final Future<void> Function() onBeAvailable;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -2144,37 +3682,43 @@ class ActiveDeliveryPanel extends StatelessWidget {
             if (order.visibleItems.length > 4)
               Text('+${order.visibleItems.length - 4} more items'),
             const SizedBox(height: 16),
-            if (!order.countsTowardActivity)
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed:
-                          updating || !order.isReady ? null : onDelivered,
-                      icon: updating
-                          ? const SizedBox.square(
-                              dimension: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.check),
-                      label: const Text('Delivered'),
-                    ),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed:
+                        updating || order.countsTowardActivity || !order.isReady
+                            ? null
+                            : onDelivered,
+                    icon: updating
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.check),
+                    label: const Text('Delivered'),
                   ),
-                ],
-              )
-            else
-              const _InlineNotice(
-                icon: Icons.check_circle,
-                text:
-                    'Delivered. POS can mark the driver available after return.',
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: order.countsTowardActivity && !updating
+                    ? onBeAvailable
+                    : null,
+                icon: const Icon(Icons.person_pin_circle_outlined),
+                label: const Text('Be available'),
               ),
+            ),
           ],
         ),
       );
 
   Future<void> _openDirections(BuildContext context) async {
     try {
-      await const MethodChannel('com.example.chicken_delight/location')
+      await const MethodChannel('com.example.pizza_hut/location')
           .invokeMethod<void>('openDirections', {
         'address': order.address,
         'latitude': order.latitude,
@@ -2345,3 +3889,4 @@ class _EmptyDeliveries extends StatelessWidget {
         ),
       );
 }
+

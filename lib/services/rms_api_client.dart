@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../app_config.dart';
 import '../models/models.dart';
 import 'rms_http_client.dart';
 
@@ -23,10 +24,29 @@ class RmsApiClient {
   final http.Client _httpClient;
   final String baseUrl;
 
-  Uri _uri(String path) => Uri.parse('$baseUrl$path');
+  Uri _uri(String path, [Map<String, String>? query]) {
+    final uri = Uri.parse('$baseUrl$path');
+    if (query == null || query.isEmpty) return uri;
+    return uri.replace(queryParameters: {...uri.queryParameters, ...query});
+  }
 
-  Future<List<MenuCategory>> fetchMenu() async {
-    final response = await _httpClient.get(_uri('/api/menu/pos-feed'));
+  Future<List<Store>> fetchBranches() async {
+    final response = await _httpClient.get(_uri('/api/branches/public'));
+    final body = _decode(response);
+    final data = body['data'];
+    if (data is! List) return const [];
+    return data
+        .whereType<Map<String, dynamic>>()
+        .map(Store.fromRmsJson)
+        .where((store) => store.id.isNotEmpty)
+        .toList();
+  }
+
+  Future<List<MenuCategory>> fetchMenu({String? branchId}) async {
+    final response = await _httpClient.get(_uri(
+      '/api/menu/pos-feed',
+      branchId == null || branchId.isEmpty ? null : {'branchId': branchId},
+    ));
     final body = _decode(response);
     final data = body['data'];
     if (data is! Map<String, dynamic>) return const [];
@@ -87,11 +107,14 @@ class RmsApiClient {
     required bool payLater,
   }) async {
     final payload = {
+      'branchId': store.id,
+      'branchName': store.name,
+      'branchCode': store.code,
       'orderType': orderType == OrderType.delivery ? 'delivery' : 'takeout',
       'orderSource': 'online',
       'items': cart.map((item) => item.toRmsOrderJson()).toList(),
       'subtotal': _money(subtotal),
-      'taxRate': subtotal <= 0 ? 0 : _money(tax / subtotal),
+      'taxRate': _money(store.taxRate),
       'tax': _money(tax),
       'discount': _money(discount),
       'discountType': discount > 0 ? 'promo' : 'none',
@@ -112,7 +135,7 @@ class RmsApiClient {
         'address': address,
         'postalCode': postalCode,
       },
-      'notes': 'Placed from Chicken Delight app. Store: ${store.name}',
+      'notes': '${AppConfig.orderNotes} Store: ${store.name}',
     };
 
     final response = await _httpClient.post(
@@ -132,12 +155,13 @@ class RmsApiClient {
         fallbackSubtotal: subtotal,
         fallbackTax: tax,
         fallbackDiscount: discount,
-        fallbackDeliveryFee: orderType == OrderType.delivery ? 4.99 : 0,
+        fallbackDeliveryFee:
+            orderType == OrderType.delivery ? store.deliveryFee : 0,
         fallbackTip: total -
             subtotal +
             discount -
             tax -
-            (orderType == OrderType.delivery ? 4.99 : 0));
+            (orderType == OrderType.delivery ? store.deliveryFee : 0));
   }
 
   Future<Order> fetchOrder({
@@ -171,9 +195,8 @@ class RmsApiClient {
     final contentType = response.headers['content-type'] ?? '';
     if (response.body.trimLeft().startsWith('<') ||
         (contentType.isNotEmpty && !contentType.contains('json'))) {
-      throw RmsApiException(
-          unavailableMessage ??
-              'The RMS API returned a web page instead of menu data. Check the backend URL.');
+      throw RmsApiException(unavailableMessage ??
+          'The RMS API returned a web page instead of menu data. Check the backend URL.');
     }
 
     final decoded =

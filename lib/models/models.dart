@@ -93,20 +93,59 @@ class Store {
       required this.distance,
       required this.isOpen,
       required this.eta,
-      required this.phone});
+      required this.phone,
+      this.code = '',
+      this.city = '',
+      this.deliveryFee = 4.99,
+      this.taxRate = .12});
 
   factory Store.fromRmsJson(Map<String, dynamic> json) => Store(
-        id: '${json['restaurantId'] ?? json['id'] ?? json['_id'] ?? ''}',
+        id: '${json['branchId'] ?? json['restaurantId'] ?? json['id'] ?? json['_id'] ?? ''}',
         name: '${json['name'] ?? 'Restaurant'}',
+        code: '${json['code'] ?? json['branchCode'] ?? ''}',
+        city: '${json['city'] ?? ''}',
         address: '${json['address'] ?? ''}',
         distance: '${json['distanceLabel'] ?? json['distance'] ?? ''}',
-        isOpen: json['isOpen'] != false,
+        isOpen: json['isOpen'] != false && json['isActive'] != false,
         eta: '${json['etaLabel'] ?? json['eta'] ?? ''}',
         phone: '${json['phone'] ?? ''}',
+        deliveryFee: _settingsNumber(json, 'deliveryFee') ?? 4.99,
+        taxRate: _taxRateFromSettings(json),
       );
 
-  final String id, name, address, distance, eta, phone;
+  final String id, name, address, distance, eta, phone, code, city;
   final bool isOpen;
+  final double deliveryFee, taxRate;
+}
+
+double? _settingsNumber(Map<String, dynamic> json, String key) {
+  final direct = json[key];
+  if (direct is num) return direct.toDouble();
+  final settings = json['settings'];
+  if (settings is Map<String, dynamic>) {
+    final taxFees = settings['taxFeesSettings'];
+    if (taxFees is Map<String, dynamic>) {
+      final value = taxFees[key];
+      if (value is num) return value.toDouble();
+    }
+    final main = settings['mainSettings'];
+    if (main is Map<String, dynamic>) {
+      final value = main[key];
+      if (value is num) return value.toDouble();
+    }
+  }
+  return null;
+}
+
+double _taxRateFromSettings(Map<String, dynamic> json) {
+  final direct = _settingsNumber(json, 'taxRate');
+  if (direct != null) return direct > 1 ? direct / 100 : direct;
+
+  final gst = _settingsNumber(json, 'gstTaxRate') ?? 0;
+  final pst = _settingsNumber(json, 'pstTaxRate') ?? 0;
+  final hst = _settingsNumber(json, 'hstTaxRate') ?? 0;
+  final total = hst > 0 ? hst : gst + pst;
+  return total > 0 ? total / 100 : .12;
 }
 
 class ItemOption {

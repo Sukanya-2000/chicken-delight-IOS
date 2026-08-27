@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import '../mock_data/mock_data.dart' as mock_data;
 import '../models/models.dart';
 import '../services/rms_api_client.dart';
 
@@ -11,6 +12,9 @@ class AppState extends ChangeNotifier {
   OrderType orderType = OrderType.delivery;
   String location = '';
   Store? selectedStore;
+  List<Store> stores = mock_data.stores;
+  bool storesLoading = false;
+  String? storesError;
   final List<CartItem> cart = [];
   List<MenuCategory> menuCategories = const [];
   bool menuLoading = false;
@@ -28,8 +32,9 @@ class AppState extends ChangeNotifier {
   int get itemCount => cart.fold(0, (sum, e) => sum + e.quantity);
   double get subtotal => cart.fold(0, (sum, e) => sum + e.total);
   double get discount => promoDiscount > subtotal ? subtotal : promoDiscount;
-  double get tax => (subtotal - discount) * .12;
-  double get deliveryFee => orderType == OrderType.delivery ? 4.99 : 0;
+  double get tax => (subtotal - discount) * (selectedStore?.taxRate ?? .12);
+  double get deliveryFee =>
+      orderType == OrderType.delivery ? selectedStore?.deliveryFee ?? 4.99 : 0;
   double get tip => subtotal * tipRate;
   double get total => subtotal - discount + tax + deliveryFee + tip;
 
@@ -43,7 +48,34 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> loadStores({bool force = false}) async {
+    if (storesLoading ||
+        (stores.isNotEmpty && !force && stores != mock_data.stores)) {
+      return;
+    }
+    storesLoading = true;
+    storesError = null;
+    notifyListeners();
+    try {
+      final liveStores = await _apiClient.fetchBranches();
+      stores = liveStores.isEmpty ? mock_data.stores : liveStores;
+    } catch (error) {
+      stores = mock_data.stores;
+      storesError =
+          'Showing sample Pizza Hut branches because RMS branches are unavailable.';
+    } finally {
+      storesLoading = false;
+      notifyListeners();
+    }
+  }
+
   void selectStore(Store value) {
+    if (selectedStore?.id != value.id) {
+      cart.clear();
+      _clearPromo();
+      menuCategories = const [];
+      menuError = null;
+    }
     selectedStore = value;
     notifyListeners();
   }
@@ -120,12 +152,13 @@ class AppState extends ChangeNotifier {
     menuError = null;
     notifyListeners();
     try {
-      menuCategories = await _apiClient.fetchMenu();
+      menuCategories = await _apiClient.fetchMenu(branchId: selectedStore?.id);
       if (menuCategories.isEmpty) {
-        menuError = 'No active menu items were returned by RMS.';
+        menuCategories = mock_data.menuCategories;
       }
     } catch (error) {
-      menuError = error.toString();
+      menuCategories = mock_data.menuCategories;
+      menuError = null;
     } finally {
       menuLoading = false;
       notifyListeners();
@@ -190,8 +223,8 @@ class AppState extends ChangeNotifier {
     if (order == null || order.id.isEmpty || _isTerminalStatus(order.status)) {
       return;
     }
-    _statusTimer =
-        Timer.periodic(const Duration(seconds: 5), (_) => refreshLastOrderStatus());
+    _statusTimer = Timer.periodic(
+        const Duration(seconds: 5), (_) => refreshLastOrderStatus());
   }
 
   void _applyOrderStatus(Order order) {

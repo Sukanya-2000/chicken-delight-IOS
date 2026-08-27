@@ -4,8 +4,8 @@ import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, CLLocationManagerDelegate {
-  private let locationChannelName = "com.example.chicken_delight/location"
-  private let riderStorageChannelName = "com.example.chicken_delight/rider_storage"
+  private let locationChannelName = "com.example.pizza_hut/location"
+  private let riderStorageChannelName = "com.example.pizza_hut/rider_storage"
   private let riderDefaultsSuiteName = "chicken_delight_rider"
   private let locationManager = CLLocationManager()
   private var pendingLocationResult: FlutterResult?
@@ -32,6 +32,16 @@ import UIKit
       switch call.method {
       case "getCurrentLocation":
         self.requestCurrentLocation(result: result)
+      case "ensureBackgroundTrackingPermission":
+        self.requestBackgroundLocationPermission(result: result)
+      case "startRiderTrackingService":
+        self.locationManager.allowsBackgroundLocationUpdates = true
+        self.locationManager.pausesLocationUpdatesAutomatically = false
+        self.locationManager.startUpdatingLocation()
+        result(true)
+      case "stopRiderTrackingService":
+        self.locationManager.stopUpdatingLocation()
+        result(nil)
       case "openDirections":
         let arguments = call.arguments as? [String: Any]
         self.openDirections(
@@ -93,6 +103,40 @@ import UIKit
     case .notDetermined:
       pendingLocationResult = result
       locationManager.requestWhenInUseAuthorization()
+    case .denied, .restricted:
+      result(FlutterError(
+        code: "permission_denied",
+        message: "Location permission denied.",
+        details: nil
+      ))
+    @unknown default:
+      result(FlutterError(
+        code: "permission_denied",
+        message: "Location permission denied.",
+        details: nil
+      ))
+    }
+  }
+
+  private func requestBackgroundLocationPermission(result: @escaping FlutterResult) {
+    guard CLLocationManager.locationServicesEnabled() else {
+      result(FlutterError(
+        code: "service_disabled",
+        message: "Location services are disabled.",
+        details: nil
+      ))
+      return
+    }
+
+    switch currentAuthorizationStatus() {
+    case .authorizedAlways:
+      result(true)
+    case .authorizedWhenInUse:
+      locationManager.requestAlwaysAuthorization()
+      result(true)
+    case .notDetermined:
+      locationManager.requestAlwaysAuthorization()
+      result(true)
     case .denied, .restricted:
       result(FlutterError(
         code: "permission_denied",

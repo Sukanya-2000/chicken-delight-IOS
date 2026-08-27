@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../app_config.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../widgets/widgets.dart';
@@ -167,8 +168,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(heading,
-                style: Theme.of(context).textTheme.headlineMedium),
+            Text(heading, style: Theme.of(context).textTheme.headlineMedium),
             Text('Live order status: $statusText'),
             if (trackingError != null) ...[
               const SizedBox(height: 8),
@@ -199,12 +199,12 @@ class _TrackingScreenState extends State<TrackingScreen> {
                       CircleAvatar(
                         backgroundColor: index <= step
                             ? Theme.of(context).colorScheme.primary
-                            : Colors.grey.shade300,
+                            : AppConfig.borderColor,
                         child: Icon(
                           index < step
                               ? Icons.check
                               : index == step
-                                  ? Icons.restaurant
+                                  ? Icons.local_pizza
                                   : Icons.circle_outlined,
                           color: index <= step ? Colors.white : Colors.grey,
                         ),
@@ -215,7 +215,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
                           height: 58,
                           color: index < step
                               ? Theme.of(context).colorScheme.primary
-                              : Colors.grey.shade300,
+                              : AppConfig.borderColor,
                         ),
                     ],
                   ),
@@ -482,7 +482,7 @@ class _LiveMapPainter extends CustomPainter {
 
     final store = Offset(size.width * .12, size.height * .78);
     final customer = Offset(size.width * .90, size.height * .18);
-    _drawPin(canvas, store, Icons.restaurant, colorScheme.primary);
+    _drawPin(canvas, store, Icons.local_pizza, colorScheme.primary);
     _drawPin(canvas, customer, isDelivery ? Icons.home : Icons.storefront,
         const Color(0xFF222222));
 
@@ -509,7 +509,8 @@ class _LiveMapPainter extends CustomPainter {
   }
 
   void _drawNeighbourhoodLabels(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xFFFFFFFF).withValues(alpha: .78);
+    final paint = Paint()
+      ..color = const Color(0xFFFFFFFF).withValues(alpha: .78);
     final labels = [
       (Offset(size.width * .16, size.height * .22), 'Portage Ave'),
       (Offset(size.width * .55, size.height * .20), 'Broadway'),
@@ -529,8 +530,8 @@ class _LiveMapPainter extends CustomPainter {
       );
       textPainter.layout();
       final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(item.$1.dx - 8, item.$1.dy - 5,
-            textPainter.width + 16, textPainter.height + 10),
+        Rect.fromLTWH(item.$1.dx - 8, item.$1.dy - 5, textPainter.width + 16,
+            textPainter.height + 10),
         const Radius.circular(12),
       );
       canvas.drawRRect(rect, paint);
@@ -566,8 +567,8 @@ class _LiveMapPainter extends CustomPainter {
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    textPainter.paint(canvas,
-        offset - Offset(textPainter.width / 2, textPainter.height / 2));
+    textPainter.paint(
+        canvas, offset - Offset(textPainter.width / 2, textPainter.height / 2));
   }
 
   void _drawDriver(Canvas canvas, Offset offset, RiderLocation location) {
@@ -591,8 +592,8 @@ class _LiveMapPainter extends CustomPainter {
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    textPainter.paint(canvas,
-        offset - Offset(textPainter.width / 2, textPainter.height / 2));
+    textPainter.paint(
+        canvas, offset - Offset(textPainter.width / 2, textPainter.height / 2));
 
     final labelPainter = TextPainter(
       text: TextSpan(
@@ -671,14 +672,14 @@ class _AccountScreenState extends State<AccountScreen> {
               ? [
                   const ListTile(
                     leading: CircleAvatar(child: Icon(Icons.person)),
-                    title: Text('Delight Guest'),
+                    title: Text('Pizza Hut Guest'),
                     subtitle: Text('guest@example.com'),
                   ),
                   const Divider(),
                   const ListTile(
                     leading: Icon(Icons.receipt_long),
-                    title: Text('Past order #CD1024'),
-                    subtitle: Text('May 18 - 8 Piece Chicken - \$32.18'),
+                    title: Text('Past order #PH1024'),
+                    subtitle: Text("May 18 - Pepperoni Lover's - \$18.99"),
                   ),
                   const ListTile(
                     leading: Icon(Icons.location_on_outlined),

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
-import '../mock_data/mock_data.dart';
+import '../app_config.dart';
 import '../models/models.dart';
 import '../providers/app_state.dart';
 import '../widgets/widgets.dart';
@@ -35,21 +35,19 @@ class _LocationScreenState extends State<LocationScreen> {
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(
-                      Icons.restaurant,
+                      Icons.local_pizza,
                       color: Colors.white,
                       size: 58,
                     ),
                   ),
                   const SizedBox(height: 22),
                   Text(
-                    'CHICKEN DELIGHT',
-                    style: Theme.of(context)
-                        .textTheme
-                        .headlineMedium
-                        ?.copyWith(color: Theme.of(context).colorScheme.primary),
+                    AppConfig.brandNameUpper,
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.primary),
                   ),
                   const Text(
-                    'There\'s delight in every bite',
+                    AppConfig.tagline,
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 36),
@@ -68,7 +66,7 @@ class _LocationScreenState extends State<LocationScreen> {
                   const SizedBox(height: 8),
                   FilledButton(
                     onPressed: () => context.push('/stores'),
-                    child: const Text('Find restaurants near me'),
+                    child: const Text('Find Pizza Huts near me'),
                   ),
                 ],
               ),
@@ -89,34 +87,61 @@ class StoreListScreen extends StatefulWidget {
 
 class _StoreListScreenState extends State<StoreListScreen> {
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<AppState>().loadStores();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final branchCount = state.stores.length;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Nearby restaurants'),
+        title: const Text('Nearby Pizza Huts'),
+        actions: [
+          IconButton(
+            onPressed: () => state.loadStores(force: true),
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
           Text(
-            '1 restaurant near ${state.location.isEmpty ? 'you' : state.location}',
+            '$branchCount Pizza Hut branch${branchCount == 1 ? '' : 'es'} near ${state.location.isEmpty ? 'you' : state.location}',
             style: Theme.of(context).textTheme.titleLarge,
           ),
           const SizedBox(height: 6),
           Text(
             state.orderType == OrderType.delivery
-                ? 'Choose this location for delivery ordering.'
-                : 'Choose this location for pickup ordering.',
+                ? 'Choose a branch for delivery ordering.'
+                : 'Choose a branch for pickup ordering.',
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
+          if (state.storesError != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              state.storesError!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
           const SizedBox(height: 16),
-          StoreCard(
-            store: stores.first,
-            onTap: () {
-              state.selectStore(stores.first);
-              context.push('/menu');
-            },
-          ),
+          if (state.storesLoading)
+            const LoadingCards()
+          else
+            ...state.stores.map(
+              (store) => StoreCard(
+                store: store,
+                onTap: () {
+                  state.selectStore(store);
+                  context.push('/menu');
+                },
+              ),
+            ),
         ],
       ),
     );
