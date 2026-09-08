@@ -101,9 +101,16 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
           final driver = driverJson is Map<String, dynamic>
               ? RiderDriver.fromJson(driverJson)
               : null;
-          if (driver != null && driver.id.trim().isNotEmpty) {
+          if (driver != null &&
+              driver.id.trim().isNotEmpty &&
+              driver.password.trim().isNotEmpty) {
             _branch = branch;
             _driver = driver;
+          } else if (driver != null && driver.password.trim().isEmpty) {
+            await _storageChannel.invokeMethod<void>(
+              'setStringList',
+              {'key': _savedSessionKey, 'values': const <String>[]},
+            );
           }
         }
       }
@@ -170,6 +177,15 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
     });
   }
 
+  Future<void> _forceLocalLogout() async {
+    await _persistSession(branch: null, driver: null);
+    if (!mounted) return;
+    setState(() {
+      _driver = null;
+      _branch = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loadingSession) {
@@ -199,6 +215,7 @@ class _RiderAuthGateState extends State<RiderAuthGate> {
       driver: driver,
       onDriverChanged: _setDriver,
       onLogout: () => unawaited(_logout()),
+      onForceLogout: _forceLocalLogout,
     );
   }
 }
@@ -731,7 +748,8 @@ class _RiderAuthScreenState extends State<RiderAuthScreen> {
         password: password.text,
         branchId: widget.branch.id,
       ))
-          .withRestaurantId(widget.branch.id);
+          .withRestaurantId(widget.branch.id)
+          .withPassword(password.text);
       try {
         final location = await _requestLocation().timeout(
           const Duration(seconds: 25),
@@ -795,6 +813,7 @@ class RiderHomeScreen extends StatefulWidget {
     required this.driver,
     required this.onDriverChanged,
     required this.onLogout,
+    required this.onForceLogout,
   });
 
   final RiderApiClient apiClient;
@@ -802,6 +821,7 @@ class RiderHomeScreen extends StatefulWidget {
   final RiderDriver driver;
   final ValueChanged<RiderDriver> onDriverChanged;
   final VoidCallback onLogout;
+  final Future<void> Function() onForceLogout;
 
   @override
   State<RiderHomeScreen> createState() => _RiderHomeScreenState();
@@ -819,6 +839,7 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   late final RiderPusherLocationClient _locationPusher;
   Timer? _refreshTimer;
   Timer? _locationTimer;
+  Timer? _checkoutPollTimer;
   RiderOrder? _selectedOrder;
   RiderOrder? _lastDeliveredOrder;
   RiderActivityStats _activityStats = const RiderActivityStats.empty();
@@ -829,22 +850,29 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   bool _posCheckUpdating = false;
   bool _updating = false;
   bool _backgroundTrackingEnabled = true;
+  bool _ordersRefreshInFlight = false;
+  bool _remoteLogoutHandled = false;
   Future<void> _activityPersistence = Future<void>.value();
   String _trackerStatus = 'Tracker starting...';
-  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _online = widget.driver.status != 'offline';
+    _online = true;
     _locationPusher = RiderPusherLocationClient(
       baseUrl: widget.apiClient.baseUrl,
       driver: widget.driver,
+      onDriverStatusChange: _handleRemoteDriverStatusChange,
     );
+    unawaited(_locationPusher.startStatusListener());
     _startLocationBroadcasting();
-    unawaited(_ensureDefaultPosCheckIn());
     unawaited(_startBackgroundTrackingService());
     unawaited(_initializeRiderData());
+    unawaited(_logoutIfCheckedOutFromRms());
+    _checkoutPollTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => unawaited(_logoutIfCheckedOutFromRms()),
+    );
     _refreshTimer =
         Timer.periodic(const Duration(seconds: 10), (_) => _loadOrders());
   }
@@ -858,6 +886,7 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   void dispose() {
     _refreshTimer?.cancel();
     _locationTimer?.cancel();
+    _checkoutPollTimer?.cancel();
     _locationPusher.dispose();
     super.dispose();
   }
@@ -904,6 +933,7 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   Future<void> _sendLocationUpdate() async {
     if (!_online) return;
     try {
+      if (await _logoutIfCheckedOutFromRms()) return;
       final location = await _requestLocation().timeout(
         const Duration(seconds: 25),
       );
@@ -935,6 +965,140 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
     }
   }
 
+  void _handleRemoteDriverStatusChange(Map<String, dynamic> data) {
+    if (_remoteLogoutHandled) return;
+    final payloadData = data['data'];
+    final payload = payloadData is Map<String, dynamic> ? payloadData : data;
+    final eventDriverIds = _driverIdsFromStatusPayload(payload);
+    final currentDriverIds = {
+      _normalizeDriverEventId(widget.driver.id),
+      _normalizeDriverEventId(widget.driver.driverId),
+    }..removeWhere((id) => id.isEmpty);
+    final status = '${payload['status'] ?? ''}'.trim().toLowerCase();
+    final message =
+        '${data['message'] ?? payload['message'] ?? ''}'.trim().toLowerCase();
+    final checkedOut = _isTruthy(payload['checkedOut']) ||
+        _isFalsy(payload['posCheckedIn']) ||
+        status == 'offline' ||
+        status == 'checked-out' ||
+        message.contains('checked out');
+    final isForThisDriver = eventDriverIds.isEmpty ||
+        eventDriverIds.any((id) => currentDriverIds.contains(id));
+    if (checkedOut && isForThisDriver) {
+      unawaited(_runLogoutApiAndLogout());
+      return;
+    }
+    unawaited(_logoutIfCheckedOutFromRms());
+  }
+
+  String _normalizeDriverEventId(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+
+  Set<String> _driverIdsFromStatusPayload(Map<String, dynamic> data) {
+    final employee = data['employeeId'];
+    return <String>{
+      '${data['driverId'] ?? ''}',
+      '${data['driver_id'] ?? ''}',
+      '${data['_id'] ?? ''}',
+      '${data['id'] ?? ''}',
+      '${data['driverCode'] ?? ''}',
+      if (employee is Map) ...[
+        '${employee['_id'] ?? ''}',
+        '${employee['id'] ?? ''}',
+        '${employee['employeeId'] ?? ''}',
+      ] else
+        '${employee ?? ''}',
+    }.map(_normalizeDriverEventId).where((id) => id.isNotEmpty).toSet();
+  }
+
+  bool _isTruthy(dynamic value) {
+    if (value == true) return true;
+    final text = '$value'.trim().toLowerCase();
+    return text == 'true' || text == '1' || text == 'yes';
+  }
+
+  bool _isFalsy(dynamic value) {
+    if (value == false) return true;
+    final text = '$value'.trim().toLowerCase();
+    return text == 'false' || text == '0' || text == 'no';
+  }
+
+  Future<void> _runLogoutApiAndLogout() async {
+    if (_remoteLogoutHandled) return;
+    _remoteLogoutHandled = true;
+    _refreshTimer?.cancel();
+    _locationTimer?.cancel();
+    _checkoutPollTimer?.cancel();
+    unawaited(_locationPusher.dispose());
+    unawaited(_stopBackgroundTrackingService());
+    await _showPosCheckoutLogoutMessage();
+    await _storageChannel.invokeMethod<void>(
+      'setStringList',
+      {'key': 'rider_saved_session', 'values': const <String>[]},
+    );
+    await widget.onForceLogout();
+    unawaited(
+      widget.apiClient
+          .updateDriverStatus(widget.driver, 'offline')
+          .catchError((_) => widget.driver),
+    );
+  }
+
+  Future<void> _showPosCheckoutLogoutMessage() async {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          "You're checked out from POS, so logging out from rider app.",
+        ),
+        duration: Duration(milliseconds: 1200),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+  }
+
+  Future<bool> _logoutIfCheckedOutFromRms() async {
+    if (_remoteLogoutHandled) return true;
+    try {
+      if (await widget.apiClient.isDriverLoginBlockedByPosCheckout(
+        widget.driver,
+      )) {
+        await _runLogoutApiAndLogout();
+        return true;
+      }
+    } catch (_) {}
+
+    try {
+      final checkedIn =
+          await widget.apiClient.isDriverCheckedInAtPos(widget.driver);
+      if (!checkedIn) {
+        await _runLogoutApiAndLogout();
+        return true;
+      }
+    } catch (_) {}
+
+    try {
+      final remoteDriver =
+          await widget.apiClient.fetchDriverProfile(widget.driver);
+      final status = remoteDriver.status.trim().toLowerCase();
+      if (!remoteDriver.posCheckedIn ||
+          status == 'offline' ||
+          status == 'checked-out') {
+        await _runLogoutApiAndLogout();
+        return true;
+      }
+    } on RmsApiException catch (error) {
+      if (error.code == '401' || error.code == '403') {
+        await _runLogoutApiAndLogout();
+        return true;
+      }
+    } catch (_) {
+      // Keep the rider on the current screen if RMS cannot be checked.
+    }
+    return false;
+  }
+
   Future<RiderLocationFix> _requestLocation() async {
     final result = await _locationChannel.invokeMapMethod<String, dynamic>(
       'getCurrentLocation',
@@ -952,9 +1116,12 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
 
   Future<void> _loadOrders() async {
     if (!_online) return;
+    if (_ordersRefreshInFlight) return;
+    _ordersRefreshInFlight = true;
     if (mounted && _orders.isEmpty) setState(() => _loading = true);
 
     try {
+      if (await _logoutIfCheckedOutFromRms()) return;
       final orders =
           await widget.apiClient.fetchDriverAssignments(widget.driver);
       final activeOrders =
@@ -1014,17 +1181,32 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
           _activityOrders,
         ).mergedWith(activityReport.stats);
         _selectedOrder = _syncSelectedOrder(activeOrders);
-        _error = null;
         _loading = false;
       });
       unawaited(_persistLocalActivityOrders());
       unawaited(_startBackgroundTrackingService());
+    } on RmsApiException catch (error) {
+      if (error.code == '401' ||
+          error.code == '403' ||
+          error.message.toLowerCase().contains('checked out')) {
+        await _runLogoutApiAndLogout();
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _trackerStatus = 'RMS temporarily unavailable; staying online';
+      });
+      unawaited(_startBackgroundTrackingService());
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _error = error.toString();
         _loading = false;
+        _trackerStatus = 'RMS temporarily unavailable; staying online';
       });
+      unawaited(_startBackgroundTrackingService());
+    } finally {
+      _ordersRefreshInFlight = false;
     }
   }
 
@@ -1221,7 +1403,6 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
             _DeliveryTab(
               driver: widget.driver,
               loading: _loading,
-              error: _error,
               online: _online,
               orders: _orders,
               selectedOrder: _selectedOrder,
@@ -1282,29 +1463,41 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
     );
   }
 
-  Future<void> _setOnline(bool value) async {
-    setState(() => _online = value);
+  Future<void> _setOnline(
+    bool value, {
+    bool notifyOnFailure = true,
+  }) async {
+    if (!value) {
+      if (mounted) setState(() => _online = true);
+      _startLocationBroadcasting();
+      unawaited(_startBackgroundTrackingService());
+      return;
+    }
+    if (mounted) setState(() => _online = true);
     try {
       final updated = await widget.apiClient.updateDriverStatus(
         widget.driver,
-        value ? 'available' : 'offline',
+        'available',
       );
       widget.onDriverChanged(updated);
-      if (value) {
-        _startLocationBroadcasting();
-        unawaited(_ensureDefaultPosCheckIn());
-        unawaited(_startBackgroundTrackingService());
-        _loadOrders();
-      } else {
-        _locationTimer?.cancel();
-        unawaited(_stopBackgroundTrackingService());
-      }
+      _startLocationBroadcasting();
+      unawaited(_startBackgroundTrackingService());
+      _loadOrders();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _online = !value);
+      setState(() {
+        _online = true;
+        _trackerStatus = 'RMS temporarily unavailable; staying online';
+      });
       _startLocationBroadcasting();
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.toString())));
+      unawaited(_startBackgroundTrackingService());
+      if (notifyOnFailure) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Still online. RMS will sync when it responds.'),
+          ),
+        );
+      }
     }
   }
 
@@ -1404,7 +1597,6 @@ class _DeliveryTab extends StatelessWidget {
   const _DeliveryTab({
     required this.driver,
     required this.loading,
-    required this.error,
     required this.online,
     required this.orders,
     required this.selectedOrder,
@@ -1419,7 +1611,6 @@ class _DeliveryTab extends StatelessWidget {
 
   final RiderDriver driver;
   final bool loading;
-  final String? error;
   final bool online;
   final List<RiderOrder> orders;
   final RiderOrder? selectedOrder;
@@ -1453,12 +1644,6 @@ class _DeliveryTab extends StatelessWidget {
             onRefresh: onRefresh,
           ),
           const SizedBox(height: 18),
-          if (error != null)
-            const _InlineNotice(
-              icon: Icons.cloud_off,
-              text: 'RMS refresh failed. Showing last loaded deliveries.',
-              isError: true,
-            ),
           if (!online)
             const _InlineNotice(
               icon: Icons.pause_circle,
@@ -1796,6 +1981,7 @@ class RiderPusherLocationClient {
   RiderPusherLocationClient({
     required this.baseUrl,
     required this.driver,
+    this.onDriverStatusChange,
     http.Client? httpClient,
   }) : _httpClient = httpClient ?? createRmsHttpClient();
 
@@ -1820,6 +2006,7 @@ class RiderPusherLocationClient {
 
   final String baseUrl;
   final RiderDriver driver;
+  final ValueChanged<Map<String, dynamic>>? onDriverStatusChange;
   final http.Client _httpClient;
   WebSocket? _socket;
   Future<void>? _connecting;
@@ -1831,8 +2018,10 @@ class RiderPusherLocationClient {
 
   String get restaurantChannelName => _channelName;
   String get _channelName => 'private-restaurant-${driver.restaurantId}';
+  String get _attendanceChannelName => 'attendance-${driver.restaurantId}';
   Set<String> get _channelNames => {
         _channelName,
+        _attendanceChannelName,
         ..._activeOrderIds.map((id) => 'private-order-$id'),
       };
 
@@ -1911,6 +2100,11 @@ class RiderPusherLocationClient {
     });
   }
 
+  Future<void> startStatusListener() async {
+    if (driver.restaurantId.trim().isEmpty) return;
+    await _ensureConnected();
+  }
+
   Future<void> _ensureConnected() async {
     final channels = _channelNames;
     if (_socket?.readyState == WebSocket.open &&
@@ -1965,13 +2159,18 @@ class RiderPusherLocationClient {
     final socketId = await socketIdCompleter.future.timeout(
       const Duration(seconds: 10),
     );
-    await _subscribeChannel(
-      socketId: socketId,
-      channelName: _channelName,
-      completer: subscriptionCompleters[_channelName],
-    );
+    for (final channelName in [_channelName, _attendanceChannelName]) {
+      await _subscribeChannel(
+        socketId: socketId,
+        channelName: channelName,
+        completer: subscriptionCompleters[channelName],
+      );
+    }
     for (final channelName in subscriptionCompleters.keys) {
-      if (channelName == _channelName) continue;
+      if (channelName == _channelName ||
+          channelName == _attendanceChannelName) {
+        continue;
+      }
       try {
         await _subscribeChannel(
           socketId: socketId,
@@ -1997,12 +2196,16 @@ class RiderPusherLocationClient {
     required Completer<void>? completer,
   }) async {
     if (completer == null) return;
-    final auth = await _authorize(socketId, channelName);
     final data = <String, dynamic>{
       'channel': channelName,
-      'auth': auth['auth'],
-      if (auth['channel_data'] != null) 'channel_data': auth['channel_data'],
     };
+    if (channelName.startsWith('private-')) {
+      final auth = await _authorize(socketId, channelName);
+      data['auth'] = auth['auth'];
+      if (auth['channel_data'] != null) {
+        data['channel_data'] = auth['channel_data'];
+      }
+    }
     _send({
       'event': 'pusher:subscribe',
       'data': data,
@@ -2077,6 +2280,9 @@ class RiderPusherLocationClient {
       _subscribedChannels.add(channelName);
       final completer = subscriptionCompleters[channelName];
       if (completer != null && !completer.isCompleted) completer.complete();
+    } else if (event == 'driver-status-change' ||
+        event == 'attendance-updated') {
+      onDriverStatusChange?.call(_decodePusherData(decoded['data']));
     } else if (event == 'pusher:error') {
       final details = _decodePusherData(decoded['data']);
       final message =
@@ -2351,6 +2557,32 @@ class RiderApiClient {
     return RiderDriver.fromJson(data);
   }
 
+  Future<bool> isDriverLoginBlockedByPosCheckout(RiderDriver driver) async {
+    final driverCode = driver.driverId.trim();
+    final password = driver.password.trim();
+    final branchId = driver.restaurantId.trim();
+    if (driverCode.isEmpty || password.isEmpty || branchId.isEmpty) {
+      return false;
+    }
+    try {
+      await loginDriver(
+        driverId: driverCode,
+        password: password,
+        branchId: branchId,
+      );
+      return false;
+    } on RmsApiException catch (error) {
+      final code = error.code.toUpperCase();
+      final message = error.message.toLowerCase();
+      if (code == 'CHECK_IN_REQUIRED' ||
+          message.contains('check-in first') ||
+          message.contains('checked out')) {
+        return true;
+      }
+      rethrow;
+    }
+  }
+
   Future<RiderBranch> verifyStoreQr(String qrToken) async {
     final qrApiUrl = RiderBranch.peekApiUrl(qrToken);
     final verifier = qrApiUrl == null ? this : withBaseUrl(qrApiUrl);
@@ -2391,7 +2623,26 @@ class RiderApiClient {
     }
     return RiderDriver.fromJson(data)
         .withToken(driver.token)
-        .withRestaurantId(driver.restaurantId);
+        .withRestaurantId(driver.restaurantId)
+        .withPassword(driver.password);
+  }
+
+  Future<RiderDriver> fetchDriverProfile(RiderDriver driver) async {
+    final response = await _httpClient
+        .get(
+          _uri('/api/delivery/driver/${driver.id}'),
+          headers: _jsonHeaders(driver.token),
+        )
+        .timeout(const Duration(seconds: 15));
+    final body = _decode(response);
+    final data = body['data'];
+    if (data is! Map<String, dynamic>) {
+      throw Exception('RMS did not return driver profile.');
+    }
+    return RiderDriver.fromJson(data)
+        .withToken(driver.token)
+        .withRestaurantId(driver.restaurantId)
+        .withPassword(driver.password);
   }
 
   Future<void> updateDriverLocation(
@@ -2458,6 +2709,57 @@ class RiderApiClient {
       employeeId: employeeId,
       action: 'check-out',
     );
+  }
+
+  Future<bool> isDriverCheckedInAtPos(RiderDriver driver) async {
+    final branchId = driver.restaurantId.trim();
+    final driverCodes = {
+      driver.driverId.trim().toUpperCase(),
+      driver.id.trim().toUpperCase(),
+    }..removeWhere((id) => id.isEmpty);
+    if (branchId.isEmpty || driverCodes.isEmpty) return false;
+
+    final response = await _getFirstAvailable([
+      _uri('/api/attendance', {'branchId': branchId}),
+      _uri('/api/employee/attendance', {'branchId': branchId}),
+    ], driver.token);
+    final body = _decode(response);
+    final data = body['data'];
+    final records = _attendanceRecordsFromData(data);
+    for (final record in records.whereType<Map<String, dynamic>>()) {
+      final employeeId = record['employeeId'];
+      final employee = record['employee'];
+      final employeeCodes = <String>{
+        if (employeeId is Map) ...[
+          '${employeeId['employeeId'] ?? ''}',
+          '${employeeId['_id'] ?? ''}',
+          '${employeeId['id'] ?? ''}',
+        ] else
+          '${employeeId ?? ''}',
+        if (employee is Map) ...[
+          '${employee['employeeId'] ?? ''}',
+          '${employee['_id'] ?? ''}',
+          '${employee['id'] ?? ''}',
+        ],
+      }.map((id) => id.trim().toUpperCase()).where((id) => id.isNotEmpty);
+      if (!employeeCodes.any(driverCodes.contains)) continue;
+      final status = '${record['status'] ?? ''}'.trim().toLowerCase();
+      return status == 'checked-in' || status == 'on-break';
+    }
+    return false;
+  }
+
+  List<dynamic> _attendanceRecordsFromData(dynamic data) {
+    if (data is List) return data;
+    if (data is Map<String, dynamic>) {
+      final records = data['records'];
+      if (records is List) return records;
+      final attendances = data['attendances'];
+      if (attendances is List) return attendances;
+      final attendance = data['attendance'];
+      if (attendance is List) return attendance;
+    }
+    return const [];
   }
 
   Future<void> _postAttendanceAction(
@@ -2942,6 +3244,8 @@ class RiderDriver {
     required this.status,
     required this.restaurantId,
     required this.token,
+    this.password = '',
+    this.posCheckedIn = true,
     this.vehicleLabel = '',
   });
 
@@ -2965,6 +3269,8 @@ class RiderDriver {
       restaurantId:
           '${json['restaurantId'] ?? json['branchId'] ?? json['branch'] ?? ''}',
       token: '${json['token'] ?? ''}',
+      password: '${json['password'] ?? ''}',
+      posCheckedIn: json['posCheckedIn'] != false,
       vehicleLabel: vehicleLabel,
     );
   }
@@ -2978,6 +3284,8 @@ class RiderDriver {
         status: status,
         restaurantId: effectiveRestaurantId(restaurantId),
         token: token,
+        password: password,
+        posCheckedIn: posCheckedIn,
         vehicleLabel: vehicleLabel,
       );
 
@@ -2999,6 +3307,22 @@ class RiderDriver {
         status: status,
         restaurantId: restaurantId,
         token: token,
+        password: password,
+        posCheckedIn: posCheckedIn,
+        vehicleLabel: vehicleLabel,
+      );
+
+  RiderDriver withPassword(String password) => RiderDriver(
+        id: id,
+        driverId: driverId,
+        name: name,
+        phone: phone,
+        color: color,
+        status: status,
+        restaurantId: restaurantId,
+        token: token,
+        password: password,
+        posCheckedIn: posCheckedIn,
         vehicleLabel: vehicleLabel,
       );
 
@@ -3012,6 +3336,8 @@ class RiderDriver {
         'status': status,
         'restaurantId': restaurantId,
         'token': token,
+        'password': password,
+        'posCheckedIn': posCheckedIn,
         if (vehicleLabel.trim().isNotEmpty)
           'assignedVehicle': {'label': vehicleLabel},
       };
@@ -3024,6 +3350,8 @@ class RiderDriver {
   final String status;
   final String restaurantId;
   final String token;
+  final String password;
+  final bool posCheckedIn;
   final String vehicleLabel;
 }
 
@@ -3889,4 +4217,3 @@ class _EmptyDeliveries extends StatelessWidget {
         ),
       );
 }
-
