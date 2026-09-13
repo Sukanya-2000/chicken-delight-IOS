@@ -2651,6 +2651,7 @@ class RiderApiClient {
     required double longitude,
   }) async {
     final response = await _httpClient
+        // iOS app-side call: POST /api/delivery/driver/{driverId}/location sends rider GPS updates.
         .post(
           _uri('/api/delivery/driver/${driver.id}/location'),
           headers: _jsonHeaders(driver.token),
