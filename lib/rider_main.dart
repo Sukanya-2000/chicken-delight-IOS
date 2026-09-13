@@ -2860,6 +2860,7 @@ class RiderApiClient {
   }
 
   Future<List<RiderOrder>> fetchDriverAssignments(RiderDriver driver) async {
+    // iOS app-side call: GET /driver/:id/assignments fetches this rider's assignments.
     final response = await _httpClient
         .get(
           _uri('/api/delivery/driver/${driver.id}/assignments'),

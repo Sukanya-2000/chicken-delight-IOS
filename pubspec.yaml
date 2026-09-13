@@ -1,7 +1,7 @@
 name: pizza_hut
 description: A Pizza Hut ordering experience backed by RMS.
 publish_to: none
-version: 1.0.0+25
+version: 1.0.0+26
 environment:
   sdk: '>=3.0.0 <4.0.0'
 dependencies:
