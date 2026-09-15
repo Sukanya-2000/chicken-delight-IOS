@@ -894,11 +894,27 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
   void _startLocationBroadcasting() {
     _locationTimer?.cancel();
     if (!_online) return;
-    _sendLocationUpdate();
-    _locationTimer = Timer.periodic(
-      const Duration(seconds: 6),
-      (_) => _sendLocationUpdate(),
+    unawaited(_sendLocationUpdate());
+  }
+
+  void _scheduleNextLocationUpdate() {
+    _locationTimer?.cancel();
+    if (!_online || !mounted) return;
+    _locationTimer = Timer(
+      _locationBroadcastIntervalFor(_currentTrackingPhase),
+      () => unawaited(_sendLocationUpdate()),
     );
+  }
+
+  Duration _locationBroadcastIntervalFor(String phase) {
+    switch (phase) {
+      case 'en-route':
+        return const Duration(seconds: 6);
+      case 'returning':
+        return const Duration(seconds: 40);
+      default:
+        return const Duration(seconds: 70);
+    }
   }
 
   Future<void> _startBackgroundTrackingService() async {
@@ -962,6 +978,8 @@ class _RiderHomeScreenState extends State<RiderHomeScreen> {
       if (mounted) {
         setState(() => _trackerStatus = 'Tracker error: $error');
       }
+    } finally {
+      _scheduleNextLocationUpdate();
     }
   }
 
@@ -1985,13 +2003,19 @@ class RiderPusherLocationClient {
     http.Client? httpClient,
   }) : _httpClient = httpClient ?? createRmsHttpClient();
 
+  // Previous Pusher details kept for future reference:
+  // PUSHER_KEY = "4ad8906fa64132edd1c8"
+  // PUSHER_CLUSTER = "ap2"
+  // New Pusher details:
+  // PUSHER_APP_ID = "2194095"
+  // PUSHER_SECRET = "5d4f20a74b12501b14a2"
   static const _apiKey = String.fromEnvironment(
     'PUSHER_KEY',
-    defaultValue: '4ad8906fa64132edd1c8',
+    defaultValue: '3b1830ff63eb0e184a68',
   );
   static const _cluster = String.fromEnvironment(
     'PUSHER_CLUSTER',
-    defaultValue: 'ap2',
+    defaultValue: 'us2',
   );
   static const _fallbackClusters = <String>[
     _cluster,
@@ -2413,19 +2437,26 @@ class RiderBackgroundTracker {
 
   Future<void> run() async {
     while (true) {
+      var nextDelay = const Duration(seconds: 70);
       try {
-        await _tick();
+        nextDelay = _backgroundBroadcastIntervalFor(await _tick());
       } catch (_) {}
-      await Future<void>.delayed(const Duration(seconds: 6));
+      await Future<void>.delayed(nextDelay);
     }
   }
 
-  Future<void> _tick() async {
+  Duration _backgroundBroadcastIntervalFor(String phase) {
+    return phase == 'en-route'
+        ? const Duration(seconds: 6)
+        : const Duration(seconds: 70);
+  }
+
+  Future<String> _tick() async {
     final session = await _loadSession();
     if (session == null) {
       await _pusher?.dispose();
       _pusher = null;
-      return;
+      return 'available';
     }
     final apiClient = RiderApiClient(
       httpClient: _httpClient,
@@ -2444,10 +2475,11 @@ class RiderBackgroundTracker {
       driver: session.driver,
     );
     pusher.updateActiveOrderIds(activeOrderIds);
+    final phase = activeOrderIds.isEmpty ? 'available' : 'en-route';
     await pusher.publishLocation(
       latitude: location.latitude,
       longitude: location.longitude,
-      phase: activeOrderIds.isEmpty ? 'available' : 'en-route',
+      phase: phase,
       activeOrderIds: activeOrderIds,
     );
     await apiClient.tryUpdateDriverLocation(
@@ -2455,6 +2487,7 @@ class RiderBackgroundTracker {
       latitude: location.latitude,
       longitude: location.longitude,
     );
+    return phase;
   }
 
   Future<_RiderBackgroundSession?> _loadSession() async {
